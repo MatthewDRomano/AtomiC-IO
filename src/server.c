@@ -390,7 +390,7 @@ int main (int argc, char *argv[]) {
 		if (errno == EINTR)
 			continue;
 		perror("Bind to port failed");
-		return -1;
+		goto err_close_socket;
 	}
 
 	// Starts listening on socket
@@ -398,14 +398,9 @@ int main (int argc, char *argv[]) {
 		if (errno == EINTR)
 			continue;
 		perror("Error while attmepting to listen on socket");
-		return -1;
+		goto err_close_socket;
 	}
 
-	// Server is "running"
-	atomic_store(&settings.running, true);
-	fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
-	fprintf(stdout, "Max players: %d\n", settings.max_players);
-	fflush(stdout);
 
 	// Creates semaphore w/ owner read / write, otherwise read only
 	cleanup_sem = sem_open("/cleanup_sem", O_CREAT, 0644, 1);
@@ -413,26 +408,34 @@ int main (int argc, char *argv[]) {
 	// Semaphore now persists for server lifetime instead of in kernel indefinitely
 	sem_unlink("/cleanup_sem");
 
+	// Error opening error log; treated as catastrophic
+	if (init_log("Anera_server") != 0)
+		goto err_close_log;	
+	
+	// Creates stack size attribute for client threads (1MB)
+	pthread_attr_t client_attr;
+        pthread_attr_init(&client_attr);
+        if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
+                fprintf(stderr, "Error setting client thread stack size\n");
+                goto err_destroy_thread_resources;
+        }
+
+	// Server is "running"
+	atomic_store(&settings.running, true);
+        fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
+        fprintf(stdout, "Max players: %d\n", settings.max_players);
+        fflush(stdout);
+	
+
 	// Spawns reaper thread to cleanup dead client threads
 	pthread_t reaper;
 	if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
 		perror("Failed to spawn reaper thread");
-		sem_close(cleanup_sem);
-		return -1;
+		atomic_store(&settings.running, false);
+		goto err_kill_reaper;
 	}
 
-	// Creates stack size attribute for client threads (1MB)
-	pthread_attr_t client_attr;
-	pthread_attr_init(&client_attr);
-	if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
-		fprintf(stderr, "Error setting client thread stack size\n");
-		raise(SIGTERM);
-	}
 
-	// Error opening error log; treated as catastrophic
-	if (init_log("Anera_server") != 0)
-		raise(SIGTERM);
-	
 	
 	// Server loop
 	while (!shutdown_requested) {
@@ -511,13 +514,23 @@ int main (int argc, char *argv[]) {
 
 	// Wakes up reaper if sleeping; ready to join
 	pthread_mutex_unlock(&clients_mutex);
-	
+
+
+	// Error creating reaper --> kills thread
+	err_kill_reaper:	
 	sem_post(cleanup_sem);
 	pthread_join(reaper, NULL);
-
 	sem_close(cleanup_sem);
-	pthread_attr_destroy(&client_attr);	
-	
+
+	err_destroy_thread_resources:
+        pthread_attr_destroy(&client_attr);
+
+	err_close_log:	
 	end_log();
+
+	// Close server port connection
+	err_close_socket:
+	close(settings.socket_fd);
+	
 	return 0;
 }
