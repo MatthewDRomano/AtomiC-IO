@@ -15,6 +15,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <semaphore.h>
+#include <fcntl.h>
 
 //#include <raylib.h>
 #include "maps.h"
@@ -34,7 +35,7 @@ static pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static user_data_t client_info = {0};
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
-static sem_t send_sem;
+static sem_t* send_sem;
 
 typedef struct settings {
         int ray_multiplier;
@@ -200,9 +201,9 @@ void* recv_thread(void *arg) {
 		
 		pthread_mutex_lock(&players_mutex);
 		memcpy(players, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
+		message_type_t type = (message_type_t)players[0].type;
 		pthread_mutex_unlock(&players_mutex);	
 	
-		message_type_t type = (message_type_t)players[0].type;
 		switch (type) {
 			case LOGOUT:
 				errlog("Recv", "msg parse", io_fd, -1, "Disconnect msg recv", client_info.username);
@@ -238,10 +239,10 @@ void* send_thread(void *arg) {
 		}
 		
 		// Wait for at least one signal
-		sem_wait(&send_sem);
+		sem_wait(send_sem);
 	
 		// Handles if multiple signals	
-		while (sem_trywait(&send_sem) == 0) {
+		while (sem_trywait(send_sem) == 0) {
             		; /* drain the counter so only most recent client info is sent */
         	}	
 	}
@@ -253,17 +254,16 @@ void* send_thread(void *arg) {
 // Graceful shutdown on SIGINT SIGTERM SIGHUP
 void shutdown_handler(int signum) {
 	shutdown_requested = 1;
-	shutdown(settings.socket_fd, SHUT_RDWR);
 }
 
 
 int main(int argc, char* argv[]) {
 	// Set signal handler to shutdown gracefully (Default flags)
-	struct sigaction shutdown = {0};
-	shutdown.sa_handler = shutdown_handler;
-	sigaction(SIGINT, &shutdown, NULL);
-	sigaction(SIGTERM, &shutdown, NULL);
-	sigaction(SIGHUP, &shutdown, NULL);
+	struct sigaction shutdown_sa = {0};
+	shutdown_sa.sa_handler = shutdown_handler;
+	sigaction(SIGINT, &shutdown_sa, NULL);
+	sigaction(SIGTERM, &shutdown_sa, NULL);
+	sigaction(SIGHUP, &shutdown_sa, NULL);
 	
 	// ENSURES the write() within send thread return -1 if server closes
 	struct sigaction sa = {0};
@@ -299,24 +299,30 @@ int main(int argc, char* argv[]) {
 	// Login message
         send_by_type(settings.socket_fd, LOGIN);
 
-	// Opens error log in /logs
+
+	// Creates semaphore w/ owner read / write, otherwise read only
+	send_sem = sem_open("/send_sem", O_CREAT, 0644, 1);
+	// Unlinks named semaphore from kernel
+	// Semaphore now persists for server lifetime instead of in kernel indefinitely
+	sem_unlink("/send_sem");
+
+
 	if (init_log("Anera_Client") == -1)
-                raise(SIGTERM);
+                goto err_close_log;
 
 
 	// Thread #1: send to server
-	sem_init(&send_sem, 0, 0);
 	pthread_t send_tid;
 	if (pthread_create(&send_tid, NULL, send_thread, NULL) != 0) {
 		fprintf(stderr, "Failed to create send thread\n");
-		raise(SIGTERM);
+		goto err_kill_send_thread;
 	}
 	
 	// Thread #2: Receive from server
 	pthread_t recv_tid;
         if (pthread_create(&recv_tid, NULL, recv_thread, NULL) != 0) {
 		fprintf(stderr, "Failed to receive send thread\n");
-		raise(SIGTERM);
+		goto err_kill_recv_thread;
 	}
 
 	
@@ -327,11 +333,12 @@ int main(int argc, char* argv[]) {
 	while (atomic_load(&settings.connected)) {
 		if (shutdown_requested) {
 			atomic_store(&settings.connected, false);
+			shutdown(settings.socket_fd, SHUT_RDWR);
 			break;
 		}
 
 
-		sem_post(&send_sem); // tells send thread client updated
+		sem_post(send_sem); // tells send thread client updated
 		sleep(1);		
 	}
 	/*	
@@ -361,13 +368,18 @@ int main(int argc, char* argv[]) {
 	}
 	CloseWindow(); 
 	*/	
-	close(settings.socket_fd);
-	sem_post(&send_sem); // Ends blocking wait in send thread
-
-	pthread_join(send_tid, NULL);
-        pthread_join(recv_tid, NULL);
-	sem_destroy(&send_sem);	
 	
+	err_kill_recv_thread:
+        pthread_join(recv_tid, NULL);
+
+	err_kill_send_thread:
+	sem_post(send_sem); // Ends blocking wait in send thread
+	pthread_join(send_tid, NULL);
+	sem_close(send_sem);
+	
+	err_close_log:
 	end_log();
+
+	close(settings.socket_fd);
 	return 0;
 }

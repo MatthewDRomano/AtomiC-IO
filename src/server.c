@@ -36,7 +36,7 @@ typedef struct client_thread {
 
 static client_thread_t *clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-static sem_t* cleanup_sem;
+static sem_t* client_cleanup_sem;
 
 
 typedef struct {
@@ -166,15 +166,15 @@ void* reaper_thread(void *arg) {
 	
 		// Ignores spurious wake ups	
 		while (!has_dead_clients()) {
-			sem_wait(cleanup_sem);
+			sem_wait(client_cleanup_sem);
 
 			// Ensures reaper does not infinitely sleep upon shutdown with no clients
 			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_players) == 0)
 				break;
 		}
 		
-		while (sem_trywait(cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
-			; // Drains cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
+		while (sem_trywait(client_cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
+			; // Drains client_cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
 		pthread_mutex_lock(&clients_mutex);
@@ -261,7 +261,7 @@ void* client_io_thread(void* arg) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN | POLLOUT;
 		
-		// Waits indiefinitely for ability to read / write to client socket
+		// Waits indiefinitely for ability to write / available data to read from client socket
 		int ready = poll(&pfd, 1, -1);
 
 		if (ready > 0) {
@@ -338,7 +338,7 @@ void* client_io_thread(void* arg) {
 	}
 	
 	close(io_fd);
-	sem_post(cleanup_sem);
+	sem_post(client_cleanup_sem);
 
 	return NULL;
 }
@@ -346,7 +346,7 @@ void* client_io_thread(void* arg) {
 // Allows graceful shutdown for SIGINT / SIGTERM
 void shutdown_handler(int signum) {
 	shutdown_requested = 1; // Async safe sig_atomic_t
-	close(settings.socket_fd); // Interrupts accept()
+	//close(settings.socket_fd); // Interrupts accept()
 }
 
 int main (int argc, char *argv[]) {
@@ -403,10 +403,10 @@ int main (int argc, char *argv[]) {
 
 
 	// Creates semaphore w/ owner read / write, otherwise read only
-	cleanup_sem = sem_open("/cleanup_sem", O_CREAT, 0644, 1);
+	client_cleanup_sem = sem_open("/client_cleanup_sem", O_CREAT, 0644, 1);
 	// Unlinks named semaphore from kernel 
 	// Semaphore now persists for server lifetime instead of in kernel indefinitely
-	sem_unlink("/cleanup_sem");
+	sem_unlink("/client_cleanup_sem");
 
 	// Error opening error log; treated as catastrophic
 	if (init_log("Anera_server") != 0)
@@ -449,11 +449,12 @@ int main (int argc, char *argv[]) {
 			(struct sockaddr*)&new_client, 
 			&adderlen)) == -1)) {
 			
-			if (errno == EINTR)
-				continue;
+			if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)
+				sleep(1);
+			
 
 			// Depending on error, client either stays or is removed by kernel from accept queue
-			// Retry accept() always since EMFILE or ENFILE not possible (if check)
+			// Retry accept() always --- EMFILE or ENFILE (fd limit) and ENOBUFS or ENOMEM are network limits. Sleep & retry
 		}
 		
 		// Exits server loop if terminated
@@ -463,6 +464,7 @@ int main (int argc, char *argv[]) {
 		// Server is full
 		if (atomic_load(&settings.connected_players) >= settings.max_players) {
 			send_by_type(client_fd, LOGOUT);
+			shutdown(client_fd, SHUT_RDWR);
 			close(client_fd);
 			continue;
 		}
@@ -518,9 +520,9 @@ int main (int argc, char *argv[]) {
 
 	// Error creating reaper --> kills thread
 	err_kill_reaper:	
-	sem_post(cleanup_sem);
+	sem_post(client_cleanup_sem);
 	pthread_join(reaper, NULL);
-	sem_close(cleanup_sem);
+	sem_close(client_cleanup_sem);
 
 	err_destroy_thread_resources:
         pthread_attr_destroy(&client_attr);
