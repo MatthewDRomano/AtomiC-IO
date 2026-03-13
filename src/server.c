@@ -141,19 +141,19 @@ bool has_dead_clients() {
 }
 
 
-// Removes client from clients pointer list / frees calloced data
-// Assumes clients mutex is locked upon call
+// Signals socket connection shutdown / frees allocated client memory
+// Mutex not needed, *ct assumed to be removed from global list prior to call
 void cleanup_client(client_thread_t* ct) {
 
-	// Closes connection / fd
+	// Closes connection & fd / ensures client thread ends
 	shutdown(ct->client_fd, SHUT_RDWR);
         close(ct->client_fd);
-        ct->client_fd = -1;
+        //	//ct->client_fd = -1;
 
 	// Avoids deadlock in other threads if join stalls
-        pthread_mutex_unlock(&clients_mutex);
+        //pthread_mutex_unlock(&clients_mutex);
         pthread_join(ct->thread, NULL);
-        pthread_mutex_lock(&clients_mutex);
+        //pthread_mutex_lock(&clients_mutex);
 
         // Frees associated memory / only after client thread ends
         free(ct);
@@ -161,6 +161,7 @@ void cleanup_client(client_thread_t* ct) {
 
 
 // Handles cleaning up client_thread_t resources when set to finished
+// Mutex unneeded in practice since reap occurs after client is removed from global list 'clients'
 void* reaper_thread(void *arg) {
 	
 	while(atomic_load(&settings.running)) {
@@ -178,14 +179,17 @@ void* reaper_thread(void *arg) {
 			; // Drains client_cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
+		// Mutex ensures a dead client is removed before other threads access clients list
 		pthread_mutex_lock(&clients_mutex);
 		client_thread_t **pp = &clients;
+		
 		while (*pp != NULL) {
 			client_thread_t *ct = *pp;
 			
 			if (atomic_load(&ct->finished)) {
 				// Removes client from clients list
 				*pp = ct->next;
+				pthread_mutex_unlock(&clients_mutex);
 	
 				// Prints user disconnected
                                 errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
@@ -195,6 +199,7 @@ void* reaper_thread(void *arg) {
 	
 				// Updates global connected_players counter	
 				atomic_fetch_sub(&settings.connected_players, 1);	
+				pthread_mutex_lock(&clients_mutex);
 			}
 				
 			else
@@ -246,12 +251,10 @@ void* client_io_thread(void* arg) {
 	/* 
 	 * Duplicates client socket file descriptor.   
 	 * Ensures when connection is closed, read/write 
-	 * does not persist to potential new socket assigned to client_fd
+	 * does not persist to potential new socket assigned to client_fd 
 	*/
 	
-	pthread_mutex_lock(&clients_mutex);
 	int io_fd = dup(ct->client_fd);
-	pthread_mutex_unlock(&clients_mutex);
 
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
@@ -478,25 +481,33 @@ int main (int argc, char *argv[]) {
 			break;
 		}
 		
-	
-		// Adds client to front of list / Ensures no race
-		// Sets file descriptor; client_io_thread also has mutex protection
-		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
-			ct->client_fd = client_fd;	
-			ct->finished = ATOMIC_VAR_INIT(false);
+		// Sets file descriptor
+		ct->client_fd = client_fd;
+                ct->finished = ATOMIC_VAR_INIT(false);	
+		
+		// Adds client to front of global list / Ensures no race
+		pthread_mutex_lock(&clients_mutex);
+                ct->next = clients;
+                clients = ct;
+                pthread_mutex_unlock(&clients_mutex);
+		
+		// Creates thread & starts IO	
+		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0)
 			atomic_fetch_add(&settings.connected_players, 1);
 
-			pthread_mutex_lock(&clients_mutex);
-			ct->next = clients;
-                        clients = ct;
-			pthread_mutex_unlock(&clients_mutex);
-		}
 		
 		// Failed to create thread			
 		else {
 			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
+			
+			// Manual cleanup since we cannot reap a nonexistent thread
+			pthread_mutex_lock(&clients_mutex);
+			if (clients == ct)
+				clients = ct->next;
+			pthread_mutex_unlock(&clients_mutex);
+
 			close(client_fd);
-                        free(ct);
+			free(ct);
 		}
 
 	}
