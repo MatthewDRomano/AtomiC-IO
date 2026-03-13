@@ -180,19 +180,15 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 
 
 void* recv_thread(void *arg) {
-	pthread_mutex_lock(&client_mutex);
-	int io_fd = dup(settings.socket_fd);
-	pthread_mutex_unlock(&client_mutex);
-	
 	while (atomic_load(&settings.connected)) {
 		int result = 0;
 		user_data_t buf[MAX_CONNECTIONS];
 
-		if ((result = full_read(io_fd, buf, MAX_CONNECTIONS)) != 0) {
+		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
 			if (result == EOF)
-				errlog("Recv", "read", io_fd, result, "EOF", client_info.username);
+				errlog("Recv", "read", settings.socket_fd, result, "EOF", client_info.username);
 			else 
-				errlog("Recv", "read", io_fd, result, "N/A", client_info.username);
+				errlog("Recv", "read", settings.socket_fd, result, "N/A", client_info.username);
 
 
 			atomic_store(&settings.connected, false);	
@@ -206,36 +202,29 @@ void* recv_thread(void *arg) {
 	
 		switch (type) {
 			case LOGOUT:
-				errlog("Recv", "msg parse", io_fd, -1, "Disconnect msg recv", client_info.username);
+				errlog("Recv", "msg parse", settings.socket_fd, -1, "Disconnect msg recv", client_info.username);
 				atomic_store(&settings.connected, false);
 				break;
 			case UPDATE_MESSAGE:
 				break;
 			// Types LOGIN and invalid types cannot be sent
 			default:
-				errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", client_info.username);
+				errlog("Recv", "msg parse", settings.socket_fd, -1, "Inv msg type", client_info.username);
 				break;
 		}
 	}	
 	
-	shutdown(io_fd, SHUT_RDWR);
-	close(io_fd);
 	return NULL;
-
 }
 
-void* send_thread(void *arg) {
-	// Dupped fd to avoid reuse bugs
-	pthread_mutex_lock(&client_mutex);
-        int io_fd = dup(settings.socket_fd);
-        pthread_mutex_unlock(&client_mutex);
-	
+void* send_thread(void *arg) {	
 	while (atomic_load(&settings.connected)) {
 		
 		int result = 0;
-		if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
+		if ((result = send_by_type(settings.socket_fd, UPDATE_MESSAGE)) != 0) {
 			atomic_store(&settings.connected, false);
-			errlog("Send", "write", -1, result, "Disconnected", client_info.username);
+			errlog("Send", "write", settings.socket_fd, result, "Disconnected", client_info.username);
+			break;
 		}
 		
 		// Wait for at least one signal
@@ -246,8 +235,7 @@ void* send_thread(void *arg) {
             		; /* drain the counter so only most recent client info is sent */
         	}	
 	}
-	shutdown(io_fd, SHUT_RDWR);
-	close(io_fd);
+
 	return NULL;
 }
 
@@ -333,7 +321,6 @@ int main(int argc, char* argv[]) {
 	while (atomic_load(&settings.connected)) {
 		if (shutdown_requested) {
 			atomic_store(&settings.connected, false);
-			shutdown(settings.socket_fd, SHUT_RDWR);
 			break;
 		}
 
@@ -368,6 +355,7 @@ int main(int argc, char* argv[]) {
 	}
 	CloseWindow(); 
 	*/	
+	shutdown(settings.socket_fd, SHUT_RDWR);
 	
 	err_kill_recv_thread:
         pthread_join(recv_tid, NULL);

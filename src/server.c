@@ -145,16 +145,17 @@ bool has_dead_clients() {
 // Assumes clients mutex is locked upon call
 void cleanup_client(client_thread_t* ct) {
 
+	// Closes connection / fd
+	shutdown(ct->client_fd, SHUT_RDWR);
+        close(ct->client_fd);
+        ct->client_fd = -1;
+
 	// Avoids deadlock in other threads if join stalls
         pthread_mutex_unlock(&clients_mutex);
         pthread_join(ct->thread, NULL);
         pthread_mutex_lock(&clients_mutex);
 
-	// Closes connection / fd
-        shutdown(ct->client_fd, SHUT_RDWR);
-        close(ct->client_fd);
-
-        // Frees associated memory
+        // Frees associated memory / only after client thread ends
         free(ct);
 }
 
@@ -480,20 +481,19 @@ int main (int argc, char *argv[]) {
 	
 		// Adds client to front of list / Ensures no race
 		// Sets file descriptor; client_io_thread also has mutex protection
-		pthread_mutex_lock(&clients_mutex);
 		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
-                	ct->next = clients;
-                	clients = ct;
-			ct->client_fd = client_fd;
-			
+			ct->client_fd = client_fd;	
 			ct->finished = ATOMIC_VAR_INIT(false);
 			atomic_fetch_add(&settings.connected_players, 1);
+
+			pthread_mutex_lock(&clients_mutex);
+			ct->next = clients;
+                        clients = ct;
 			pthread_mutex_unlock(&clients_mutex);
 		}
 		
 		// Failed to create thread			
 		else {
-			pthread_mutex_unlock(&clients_mutex);
 			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
 			close(client_fd);
                         free(ct);
