@@ -49,6 +49,7 @@ typedef struct {
 } settings_t;
 
 static settings_t settings;
+
 // Volatile ignores compiler opitmizations due to updating in async signal handler
 static volatile sig_atomic_t shutdown_requested = 0;
 
@@ -311,11 +312,19 @@ void* client_io_thread(void* arg) {
 		
 			// Writes to client
 			if (pfd.revents & POLLOUT) {
+					
+				// TEMPORARY DIAGNOSTICS
+				if ((now_ms() - last_send_time) > 1.1 * NETWORK_TRANSFER_PERIOD) {
+                                        char msg[128] = {0};
+                                        snprintf(msg, 128, "%s: At least 1.1x Latency Sending message", buf.username);
+                                        msglog(msg);
+                                }
+
 				// Fixed transfer period 
 				// NETWORK_TRANSFER_PERIOD defined in anera_net.h 
 				if (now_ms() - last_send_time < NETWORK_TRANSFER_PERIOD)
 					continue;
-		
+				
 				else
 					last_send_time = now_ms();
 
@@ -325,6 +334,7 @@ void* client_io_thread(void* arg) {
 					atomic_store(&ct->finished, true);
 					break;
 				}
+				
 			}
 
 				
@@ -356,11 +366,11 @@ void shutdown_handler(int signum) {
 int main (int argc, char *argv[]) {
 	
 	// Handles termination	
-	struct sigaction shutdown = {0};
-	shutdown.sa_handler = shutdown_handler;
+	struct sigaction shutdown_sa = {0};
+	shutdown_sa.sa_handler = shutdown_handler;
 	
-	sigaction(SIGINT, &shutdown, NULL);
-	sigaction(SIGTERM, &shutdown, NULL);
+	sigaction(SIGINT, &shutdown_sa, NULL);
+	sigaction(SIGTERM, &shutdown_sa, NULL);
 
 	struct sigaction ign = {0};
 	ign.sa_handler = SIG_IGN;
@@ -413,7 +423,7 @@ int main (int argc, char *argv[]) {
 	sem_unlink("/client_cleanup_sem");
 
 	// Error opening error log; treated as catastrophic
-	if (init_log("Anera_server") != 0)
+	if (init_log("Server") != 0)
 		goto err_close_log;	
 	
 	// Creates stack size attribute for client threads (1MB)
@@ -525,7 +535,6 @@ int main (int argc, char *argv[]) {
 		c = c->next;
 	}
 
-	// Wakes up reaper if sleeping; ready to join
 	pthread_mutex_unlock(&clients_mutex);
 
 

@@ -295,7 +295,7 @@ int main(int argc, char* argv[]) {
 	sem_unlink("/send_sem");
 
 
-	if (init_log("Anera_Client") == -1)
+	if (init_log(client_info.username) == -1)
                 goto err_close_log;
 
 
