@@ -314,9 +314,9 @@ void* client_io_thread(void* arg) {
 			if (pfd.revents & POLLOUT) {
 					
 				// TEMPORARY DIAGNOSTICS
-				if ((now_ms() - last_send_time) > 1.1 * NETWORK_TRANSFER_PERIOD) {
+				if ((now_ms() - last_send_time) > 2 * NETWORK_TRANSFER_PERIOD) {
                                         char msg[128] = {0};
-                                        snprintf(msg, 128, "%s: At least 1.1x Latency Sending message", buf.username);
+                                        snprintf(msg, 128, "%s: At least 2x Latency Sending message", buf.username);
                                         msglog(msg);
                                 }
 

@@ -56,7 +56,10 @@ static err_entry_t* _Atomic err_entries_tail = NULL;
 static msg_entry_t* _Atomic msg_entries_head = NULL;
 static msg_entry_t* _Atomic msg_entries_tail = NULL;
 
-
+// err_log and msg_log temporarily point new entries to SENTINAL
+// perform_logging knows when not to interrupt the process of adding to list
+static const msg_entry_t MSG_SENTINAL = {0};
+static const err_entry_t ERR_SENTINAL = {0};
 
 // Sets time buffer to second-precision timestamp 
 int set_timestamp(char* time) {
@@ -139,31 +142,23 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
 	// Set fields
 
 	memcpy(new_err_entry->timestamp, time_s, TIMESTAMP_LEN);
-	//new_err_entry->timestamp[TIMESTAMP_LEN-1] = '\0';
 	// const char* always safe (saved in data segment)
 	new_err_entry->thread = thread;
 	new_err_entry->call = call;
 	new_err_entry->fd = fd;
 	new_err_entry->errnum = errnum;
 		
-	//char buf[MAX_MSG_LEN];
 	// Null terminated
-	//strerror(errnum, buf, sizeof(buf));
-	snprintf(new_err_entry->err_desc, MAX_MSG_LEN, "%s", sterror(errnum));
+	snprintf(new_err_entry->err_desc, MAX_MSG_LEN, "%s", strerror(errnum));
 	new_err_entry->client = client;
-	new_err_entry->next_entry = NULL;
+	new_err_entry->next_entry = &ERR_SENTINAL;
 	
 
 	err_entry_t* prev_tail = atomic_exchange(&err_entries_tail, new_err_entry); 
-        //if (!atomic_load(&prev_tail)) {
-                //atomic_store(&err_entries_head, new_err_entry);
-                ////atomic_store(&err_entries_tail, new_err_entry);
-        //}
+        atomic_store(&prev_tail->next_entry, new_err_entry);
 
-        //else {
-                atomic_store(&prev_tail->next_entry, new_err_entry);
-                //atomic_exchange(&err_entries_tail, new_err_entry);
-        //}
+	atomic_store(&err_entries_tail->next_entry, NULL);
+	
 
         sem_post(log_sem);
         return 0;
@@ -183,22 +178,14 @@ int msglog(char* msg) {
 	}
 	
 	memcpy(new_msg_entry->timestamp, time_s, TIMESTAMP_LEN);
-	//new_msg_entry->timestamp[TIMESTAMP_LEN-1] = '\0';
 	memcpy(new_msg_entry->msg, msg, MAX_MSG_LEN);
 	new_msg_entry->msg[MAX_MSG_LEN-1] = '\0';
-	new_msg_entry->next_entry = NULL;
+	new_msg_entry->next_entry = &MSG_SENTINAL;
 
 	msg_entry_t* prev_tail = atomic_exchange(&msg_entries_tail, new_msg_entry);
-	//if (!atomic_load(&prev_tail)) {
-		//atomic_store(&msg_entries_head, new_msg_entry);
-		//atomic_store(&msg_entries_tail, new_msg_entry);
-	//}
+	atomic_store(&prev_tail->next_entry, new_msg_entry);
 	
-	//else {
-		
-		atomic_store(&prev_tail->next_entry, new_msg_entry);
-		//atomic_exchange(&msg_entries_tail, new_msg_entry);
-        //}
+	atomic_store(&msg_entries_tail->next_entry, NULL);
 
 	sem_post(log_sem);
 	return 0;
@@ -238,9 +225,10 @@ static void* perform_logging(void* arg) {
 		
 		// All fields NULL -> msg_log adds new entries to dummy tail
 		msg_entry_t* dummy_msg_tail = (msg_entry_t*)calloc(1, sizeof(msg_entry_t));
+		// Ensures msg_log is not in the middle of adding entry
+		while (atomic_load(&msg_entries_tail->next_entry) == &MSG_SENTINAL);
+			
 		msg_entry_t* old_msg_tail = atomic_exchange(&msg_entries_tail, dummy_msg_tail);
-		//msg_entry_t* expected_null = NULL;
-		//atomic_compare_exchange_strong(&old_msg_tail->next_entry, &expected_null, dummy_msg_tail);
 		msg_entry_t* old_msg_head = atomic_exchange(&msg_entries_head, dummy_msg_tail);
 
 		// Logs all entries, ignoring first dummy node
@@ -259,6 +247,9 @@ static void* perform_logging(void* arg) {
 		// All fields NULL -> err_log adds new entries to dummy tail
 
 		err_entry_t* dummy_err_tail = (err_entry_t*)calloc(1, sizeof(err_entry_t));
+		// Ensures err_log is not in the middle of adding entry
+		while (atomic_load(&err_entries_tail->next_entry) == &ERR_SENTINAL);
+
                 err_entry_t* old_err_tail = atomic_exchange(&err_entries_tail, dummy_err_tail);
                 err_entry_t* old_err_head = atomic_exchange(&err_entries_head, dummy_err_tail);
 
