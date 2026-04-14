@@ -81,8 +81,8 @@ int parse_args(int argc, char* argv[]) {
 				return -1;
 			}
 			
-			strncpy(client_info.username, argv[i], sizeof(client_info.username));
-			client_info.username[31] = '\0';
+			// Upper bound username size declared in anera_net.h	
+			snprintf(client_info.username, CLIENT_USERNAME_SIZE, "%s", argv[i]);
 			username_set = true;
 		}
 

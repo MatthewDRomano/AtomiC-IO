@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <fcntl.h> // For O_CREAT and open flags 
+#include <unistd.h>
 #include <stdatomic.h>
 #include <time.h>
 #include <stdbool.h>
@@ -37,29 +38,34 @@ typedef struct err_entry {
 	int errnum;
 	char err_desc[MAX_MSG_LEN];
 	const char* client;
-	struct err_entry* _Atomic next_entry;
+	//struct err_entry* _Atomic next_entry;
 } err_entry_t;
 
 // Log entry for standard messages
 typedef struct msg_entry {
 	char timestamp[TIMESTAMP_LEN];
-	char msg[MAX_MSG_LEN];
-	struct msg_entry* _Atomic next_entry; 
+	char text[MAX_MSG_LEN];
+	//struct msg_entry* _Atomic next_entry; 
 } msg_entry_t;
 
 
+typedef struct log_entry {
+	bool isError;
+	union {
+		msg_entry_t message;
+		err_entry_t error;
+	} format;
+	struct log_entry* _Atomic next_entry;
+} log_entry_t;
 
-// Global linked lists of log entries / log_thread will log upon sem_post
+
+// Global linked list of log entries / log_thread will log upon sem_post
 // Supports atomic pointer swaps
-static err_entry_t* _Atomic err_entries_head = NULL;
-static err_entry_t* _Atomic err_entries_tail = NULL;
-static msg_entry_t* _Atomic msg_entries_head = NULL;
-static msg_entry_t* _Atomic msg_entries_tail = NULL;
+static log_entry_t* _Atomic log_head = NULL;
+static log_entry_t* _Atomic log_tail = NULL;
 
-// err_log and msg_log temporarily point new entries to SENTINAL
 // perform_logging knows when not to interrupt the process of adding to list
-static const msg_entry_t MSG_SENTINAL = {0};
-static const err_entry_t ERR_SENTINAL = {0};
+static const log_entry_t SENTINEL = {0};
 
 // Sets time buffer to second-precision timestamp 
 int set_timestamp(char* time) {
@@ -87,15 +93,13 @@ int init_log(char* log_name) {
         // Semaphore now persists for server lifetime instead of in kernel indefinitely
         sem_unlink(sem_name);
 
-	msg_entries_head = (msg_entry_t*)calloc(1, sizeof(msg_entry_t));
-	err_entries_head = (err_entry_t*)calloc(1, sizeof(err_entry_t));
-	if (!msg_entries_head || !err_entries_head) {
-		fprintf(stderr, "Error allocating memory for logs\n");
+	log_head = (log_entry_t*)calloc(1, sizeof(log_entry_t));
+	if (!log_head) {
+		fprintf(stderr, "Error allocating memory for log\n");
 		sem_close(log_sem);
 		return -1;
 	}	
-	msg_entries_tail = msg_entries_head;
-	err_entries_tail = err_entries_head;
+	log_tail = log_head;
 
 	// Spawns logging thread
 	snprintf(log_path, MAX_PATH_LEN, "%s", log_name);
@@ -120,8 +124,8 @@ int end_log() {
 	pthread_join(log_thread, NULL);
 
 	// After thread finishes, head = tail	
-	free(msg_entries_head);
-	free(err_entries_head);
+	free(log_head);
+	//free(err_entries_head);
 	sem_close(log_sem);
 	return 0;
 }
@@ -133,31 +137,31 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
 	char time_s[TIMESTAMP_LEN] = {0};
 	set_timestamp(time_s);
 
-	err_entry_t* new_err_entry = (err_entry_t*)malloc(sizeof(err_entry_t));
-        if (!new_err_entry) {
+	log_entry_t* new_entry = (log_entry_t*)malloc(sizeof(log_entry_t));
+        if (!new_entry) {
                 fprintf(stderr, "Error initializing err log entry");
                 return -1;
         }
+	new_entry->isError = true;
+	new_entry->next_entry = &SENTINEL;
 	
 	// Set fields
-
-	memcpy(new_err_entry->timestamp, time_s, TIMESTAMP_LEN);
+	memcpy(new_entry->format.error.timestamp, time_s, TIMESTAMP_LEN);
 	// const char* always safe (saved in data segment)
-	new_err_entry->thread = thread;
-	new_err_entry->call = call;
-	new_err_entry->fd = fd;
-	new_err_entry->errnum = errnum;
+	new_entry->format.error.thread = thread;
+	new_entry->format.error.call = call;
+	new_entry->format.error.fd = fd;
+	new_entry->format.error.errnum = errnum;
 		
 	// Null terminated
-	snprintf(new_err_entry->err_desc, MAX_MSG_LEN, "%s", strerror(errnum));
-	new_err_entry->client = client;
-	new_err_entry->next_entry = &ERR_SENTINAL;
+	snprintf(new_entry->format.error.err_desc, MAX_MSG_LEN, "%s", strerror(errnum));
+	new_entry->format.error.client = client;
 	
 
-	err_entry_t* prev_tail = atomic_exchange(&err_entries_tail, new_err_entry); 
-        atomic_store(&prev_tail->next_entry, new_err_entry);
+	log_entry_t* prev_tail = atomic_exchange(&log_tail, new_entry); 
+        atomic_store(&prev_tail->next_entry, new_entry);
 
-	atomic_store(&err_entries_tail->next_entry, NULL);
+	atomic_store(&log_tail->next_entry, NULL);
 	
 
         sem_post(log_sem);
@@ -171,21 +175,22 @@ int msglog(char* msg) {
 	char time_s[TIMESTAMP_LEN] = {0};
 	set_timestamp(time_s);
 
-	msg_entry_t* new_msg_entry = (msg_entry_t*)malloc(sizeof(msg_entry_t));
-	if (!new_msg_entry) {
+	log_entry_t* new_entry = (log_entry_t*)malloc(sizeof(log_entry_t));
+	if (!new_entry) {
 		fprintf(stderr, "Error initializing msg log entry");
 		return -1;
 	}
+	new_entry->isError = false;
+	new_entry->next_entry = &SENTINEL;
 	
-	memcpy(new_msg_entry->timestamp, time_s, TIMESTAMP_LEN);
-	memcpy(new_msg_entry->msg, msg, MAX_MSG_LEN);
-	new_msg_entry->msg[MAX_MSG_LEN-1] = '\0';
-	new_msg_entry->next_entry = &MSG_SENTINAL;
+	memcpy(new_entry->format.message.timestamp, time_s, TIMESTAMP_LEN);
+	memcpy(new_entry->format.message.text, msg, MAX_MSG_LEN);
+	new_entry->format.message.text[MAX_MSG_LEN-1] = '\0';
 
-	msg_entry_t* prev_tail = atomic_exchange(&msg_entries_tail, new_msg_entry);
-	atomic_store(&prev_tail->next_entry, new_msg_entry);
+	log_entry_t* prev_tail = atomic_exchange(&log_tail, new_entry);
+	atomic_store(&prev_tail->next_entry, new_entry);
 	
-	atomic_store(&msg_entries_tail->next_entry, NULL);
+	atomic_store(&log_tail->next_entry, NULL);
 
 	sem_post(log_sem);
 	return 0;
@@ -223,50 +228,36 @@ static void* perform_logging(void* arg) {
 			; // sem_trywait drains log_sem until it becomes 0
 		}
 		
-		// All fields NULL -> msg_log adds new entries to dummy tail
-		msg_entry_t* dummy_msg_tail = (msg_entry_t*)calloc(1, sizeof(msg_entry_t));
-		// Ensures msg_log is not in the middle of adding entry
-		while (atomic_load(&msg_entries_tail->next_entry) == &MSG_SENTINAL);
+		// All fields NULL -> log adds new entries to dummy tail
+		log_entry_t* dummy_tail = (log_entry_t*)calloc(1, sizeof(log_entry_t));
+		// Ensures log is not in the middle of adding entry
+		while (atomic_load(&log_tail->next_entry) == &SENTINEL);
 			
-		msg_entry_t* old_msg_tail = atomic_exchange(&msg_entries_tail, dummy_msg_tail);
-		msg_entry_t* old_msg_head = atomic_exchange(&msg_entries_head, dummy_msg_tail);
+		log_entry_t* old_tail = atomic_exchange(&log_tail, dummy_tail);
+		log_entry_t* old_head = atomic_exchange(&log_head, dummy_tail);
 
 		// Logs all entries, ignoring first dummy node
-		while (old_msg_head->next_entry != NULL) {
-			msg_entry_t* next = old_msg_head->next_entry;
-			free(old_msg_head);
+		while (old_head->next_entry != NULL) {
+			log_entry_t* next = old_head->next_entry;
+			free(old_head);
 			
-			if (fprintf(log_f, "[%s] | %s\n", next->timestamp, next->msg) == EOF)
-        		      fprintf(stderr, "Error writing msg log entry\n");
-        		
-			old_msg_head = next;
+			// Prints appropriate log type (msg/err) based on union format value 	
+			if (!next->isError) {
+				msg_entry_t* message = &next->format.message;
+				if (fprintf(log_f, "[%s] | %s\n", message->timestamp, message->text) == EOF)
+        		      		fprintf(stderr, "Error writing msg log entry\n");
+        		}
+
+			else if (next->isError) {
+				err_entry_t* error = &next->format.error;
+				if (fprintf(log_f, "[%s] | thread: %s | %s | fd=%d | Error: %s | Client name: %s\n",
+                                error->timestamp, error->thread, error->call, error->fd, error->err_desc, error->client) == EOF)
+                                        fprintf(stderr, "Error writing err log entry\n");
+			}	
+			old_head = next;
 		}
 		// Frees last node 
-		free(old_msg_head);	
-
-		// All fields NULL -> err_log adds new entries to dummy tail
-
-		err_entry_t* dummy_err_tail = (err_entry_t*)calloc(1, sizeof(err_entry_t));
-		// Ensures err_log is not in the middle of adding entry
-		while (atomic_load(&err_entries_tail->next_entry) == &ERR_SENTINAL);
-
-                err_entry_t* old_err_tail = atomic_exchange(&err_entries_tail, dummy_err_tail);
-                err_entry_t* old_err_head = atomic_exchange(&err_entries_head, dummy_err_tail);
-
-		// Logs all entries, ignoring first dummy node
-		while (old_err_head->next_entry != NULL) {
-			err_entry_t* next = old_err_head->next_entry;
-			free(old_err_head);
-			
-			if (fprintf(log_f, "[%s] | thread: %s | %s | fd=%d | Error: %s | Client name: %s\n",
-        	          	next->timestamp, next->thread, next->call, next->fd, next->err_desc, next->client) == EOF)
-					fprintf(stderr, "Error writing err log entry\n");
-
-			old_err_head = next;
-		}
-		// Frees last node
-		free(old_err_head);
-
+		free(old_head);	
 		fflush(log_f);
 	}	
 	

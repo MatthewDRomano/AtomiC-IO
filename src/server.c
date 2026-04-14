@@ -320,6 +320,20 @@ void* client_io_thread(void* arg) {
                                         msglog(msg);
                                 }
 
+				// TEMPORARY DIAGNOSTICS
+                                if ((now_ms() - last_send_time) > 1.5 * NETWORK_TRANSFER_PERIOD) {
+                                        char msg[128] = {0};
+                                        snprintf(msg, 128, "%s: At least 1.5x Latency Sending message", buf.username);
+                                        msglog(msg);
+                                }
+
+				// TEMPORARY DIAGNOSTICS
+                                if ((now_ms() - last_send_time) > 1.2 * NETWORK_TRANSFER_PERIOD) {
+                                        char msg[128] = {0};
+                                        snprintf(msg, 128, "%s: At least 1.2x Latency Sending message", buf.username);
+                                        msglog(msg);
+                                }
+
 				// Fixed transfer period 
 				// NETWORK_TRANSFER_PERIOD defined in anera_net.h 
 				if (now_ms() - last_send_time < NETWORK_TRANSFER_PERIOD)

@@ -5,7 +5,7 @@
 
 #define MAX_CONNECTIONS 15
 #define DEFAULT_PORT 5555
-#define CLIENT_USERNAME_SIZE
+#define CLIENT_USERNAME_SIZE 32
 
 // Bounded Server->Client data transfer rate (every __ ms)
 #define NETWORK_TRANSFER_PERIOD 25
@@ -21,7 +21,7 @@ typedef enum {
 // Network safe player info struct
 typedef struct __attribute__((packed)) {
 	uint8_t type;
-	char username[32];
+	char username[CLIENT_USERNAME_SIZE];
 	uint16_t pos_x, pos_y;
 } user_data_t;
 
