@@ -12,7 +12,7 @@ int end_log();
 
 // Inserts human readable unix timestamp into time buffer
 // Seconds-Precision
-int set_timestamp(char* time);
+void set_timestamp(char* time);
 
 /* 
  * Logs an error entry

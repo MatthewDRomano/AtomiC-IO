@@ -9,6 +9,7 @@
 
 // Bounded Server->Client data transfer rate (every __ ms)
 #define NETWORK_TRANSFER_PERIOD 25
+#define PACKET_DROP_THRESHOLD (NETWORK_TRANSFER_PERIOD * 2)
 
 
 // Message type identifier

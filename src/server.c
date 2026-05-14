@@ -45,7 +45,8 @@ typedef struct {
 	int socket_fd; // for listening only
 	int max_players;
 	struct sockaddr_in server;
-
+	bool devlogs_enabled;
+	bool drop_late_packets;
 } settings_t;
 
 static settings_t settings;
@@ -62,7 +63,8 @@ void init_def_settings() {
 	settings.connected_players = ATOMIC_VAR_INIT(0);
 	settings.running = ATOMIC_VAR_INIT(false);
 	settings.max_players = MAX_CONNECTIONS;
-
+	settings.devlogs_enabled = false;
+	settings.drop_late_packets = false;
 }
 
 
@@ -72,7 +74,7 @@ int parse_args(int argc, char *argv[]) {
 	for (int i = 1; i < argc; i++) {
 		// Usage menu
 		if (strcmp("-h", argv[i]) == 0 || strcmp("--help", argv[i]) == 0) {
-			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT]\n");
+			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT] [--verbose] [--drop-late]\n");
 			exit(0);
 		}
 
@@ -114,6 +116,14 @@ int parse_args(int argc, char *argv[]) {
 			settings.max_players = (int)n;
 		}
 
+		// verbose logging / devlogs
+		else if (strcmp("--verbose", argv[i]) == 0)
+			settings.devlogs_enabled = true;
+			
+		// Allows user to choose if late packets should be dropped or not / false by default
+		else if (strcmp("--drop-late", argv[i]) == 0)
+			settings.drop_late_packets = true;
+	
 		else {
 			fprintf(stderr, "Invalid argument \"%s\"\n", argv[i]);
 			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT]\n");
@@ -313,32 +323,34 @@ void* client_io_thread(void* arg) {
 			// Writes to client
 			if (pfd.revents & POLLOUT) {
 					
-				// TEMPORARY DIAGNOSTICS
-				if ((now_ms() - last_send_time) > 2 * NETWORK_TRANSFER_PERIOD) {
-                                        char msg[128] = {0};
-                                        snprintf(msg, 128, "%s: At least 2x Latency Sending message", buf.username);
-                                        msglog(msg);
-                                }
+				// NETWORK DELAY CHECK
+				uint64_t delay = now_ms() - last_send_time;
+				float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
 
-				// TEMPORARY DIAGNOSTICS
-                                if ((now_ms() - last_send_time) > 1.5 * NETWORK_TRANSFER_PERIOD) {
-                                        char msg[128] = {0};
-                                        snprintf(msg, 128, "%s: At least 1.5x Latency Sending message", buf.username);
-                                        msglog(msg);
-                                }
+				if (delay > PACKET_DROP_THRESHOLD) {
+    					if (settings.devlogs_enabled) {
+        					// Determine status tag based on policy
+        					const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
+        
+        					char msg[128];
+        					snprintf(msg, 128, "%s: %.3fx Latency %s", 
+                 					buf.username, latency_ratio, status);
+        
+        					msglog(msg);
+    					}
 
-				// TEMPORARY DIAGNOSTICS
-                                if ((now_ms() - last_send_time) > 1.2 * NETWORK_TRANSFER_PERIOD) {
-                                        char msg[128] = {0};
-                                        snprintf(msg, 128, "%s: At least 1.2x Latency Sending message", buf.username);
-                                        msglog(msg);
-                                }
+    					if (settings.drop_late_packets) {
+        					last_send_time = now_ms();
+						continue; 
+					}
+				}
 
-				// Fixed transfer period 
+				// Too early
 				// NETWORK_TRANSFER_PERIOD defined in anera_net.h 
-				if (now_ms() - last_send_time < NETWORK_TRANSFER_PERIOD)
+				else if (delay < NETWORK_TRANSFER_PERIOD)
 					continue;
-				
+			
+				// ON TIME
 				else
 					last_send_time = now_ms();
 
