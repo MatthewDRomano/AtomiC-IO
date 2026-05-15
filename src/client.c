@@ -17,28 +17,23 @@
 #include <semaphore.h>
 #include <fcntl.h>
 
-//#include <raylib.h>
-#include "maps.h"
 #include "anera_net.h"
 #include "log.h"
 
 
-#define DEFAULT_RAYS 180
-#define FOV 90
 #define MAX_PORT 65535
 
 
 
 // Holds MAX_CONNECTIONS slots of user_data_t. Unused slots store 0 and are ignored
-static user_data_t players[MAX_CONNECTIONS] = {0};
-static pthread_mutex_t players_mutex = PTHREAD_MUTEX_INITIALIZER;
+static user_data_t users[MAX_CONNECTIONS] = {0};
+static pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static user_data_t client_info = {0};
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sem_t* send_sem;
 
 typedef struct settings {
-        int ray_multiplier;
         struct sockaddr_in server;
         int socket_fd;
         atomic_bool connected;
@@ -55,7 +50,6 @@ void init_def_settings() {
         inet_pton(AF_INET, "127.0.0.1", &settings.server.sin_addr);
 	
 	atomic_init(&settings.connected, false);
-        settings.ray_multiplier = 1;
 }
 
 
@@ -185,20 +179,18 @@ void* recv_thread(void *arg) {
 		user_data_t buf[MAX_CONNECTIONS];
 
 		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
-			if (result == EOF)
-				errlog("Recv", "read", settings.socket_fd, result, "EOF", client_info.username);
-			else 
-				errlog("Recv", "read", settings.socket_fd, result, "N/A", client_info.username);
-
+			const char* err_status = (result == EOF) ? "EOF" : "N/A";
+			
+			errlog("Recv", "read", settings.socket_fd, result, err_status, client_info.username);
 
 			atomic_store(&settings.connected, false);	
 			break;
 		}
 		
-		pthread_mutex_lock(&players_mutex);
-		memcpy(players, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
-		message_type_t type = (message_type_t)players[0].type;
-		pthread_mutex_unlock(&players_mutex);	
+		pthread_mutex_lock(&users_mutex);
+		memcpy(users, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
+		message_type_t type = (message_type_t)users[0].type;
+		pthread_mutex_unlock(&users_mutex);	
 	
 		switch (type) {
 			case LOGOUT:
@@ -315,7 +307,7 @@ int main(int argc, char* argv[]) {
 
 	
 
-	// Thread Main: Game loop
+	// Thread Main: Client Loop
 	fprintf(stdout, "Connected to server\n");
         fflush(stdout);
 	while (atomic_load(&settings.connected)) {
@@ -328,33 +320,7 @@ int main(int argc, char* argv[]) {
 		sem_post(send_sem); // tells send thread client updated
 		sleep(1);		
 	}
-	/*	
-	point_t start_pos;
-	start_pos.x = 50;
-	start_pos.y = 50;
-
-	double view_angle = M_PI / 4;
-	double ray_displacement = fov / (default_rays * settings.ray_multiplier);
-
 	
-	InitWindow(1000, 500, "Anera: Alpha");
-	while (!WindowShouldClose()) {
-		BeginDrawing();
-		ClearBackground(BLACK);
-
-		// Handles each ray iteratively
-		for (int i = 0; i < default_rays * settings.ray_multiplier; i++) {
-			// Find where it hits
-			
-		}
-
-
-
-		EndDrawing();
-		
-	}
-	CloseWindow(); 
-	*/	
 	shutdown(settings.socket_fd, SHUT_RDWR);
 	
 	err_kill_recv_thread:

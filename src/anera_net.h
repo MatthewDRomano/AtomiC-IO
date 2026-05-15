@@ -19,15 +19,16 @@ typedef enum {
 	UPDATE_MESSAGE
 } message_type_t;
 
-// Network safe player info struct
+// Network safe user info struct
 typedef struct __attribute__((packed)) {
 	uint8_t type;
 	char username[CLIENT_USERNAME_SIZE];
+	uint32_t ID;
 	uint16_t pos_x, pos_y;
 } user_data_t;
 
 // Shared client / server IO methods
-int full_read(int socket_fd, user_data_t *player_info, int users);
-int full_write(int socket_fd, user_data_t *player_info, int users);
+int full_read(int socket_fd, user_data_t* user_info, int users);
+int full_write(int socket_fd, user_data_t* user_info, int users);
 
 #endif

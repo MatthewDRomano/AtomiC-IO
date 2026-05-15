@@ -40,10 +40,10 @@ static sem_t* client_cleanup_sem;
 
 
 typedef struct {
-	atomic_int connected_players;
+	atomic_int connected_users;
 	atomic_bool running;
 	int socket_fd; // for listening only
-	int max_players;
+	int max_users;
 	struct sockaddr_in server;
 	bool devlogs_enabled;
 	bool drop_late_packets;
@@ -60,9 +60,9 @@ void init_def_settings() {
 	settings.server.sin_addr.s_addr = INADDR_ANY;
 
 	settings.socket_fd = 0;
-	settings.connected_players = ATOMIC_VAR_INIT(0);
+	settings.connected_users = ATOMIC_VAR_INIT(0);
 	settings.running = ATOMIC_VAR_INIT(false);
-	settings.max_players = MAX_CONNECTIONS;
+	settings.max_users = MAX_CONNECTIONS;
 	settings.devlogs_enabled = false;
 	settings.drop_late_packets = false;
 }
@@ -74,7 +74,7 @@ int parse_args(int argc, char *argv[]) {
 	for (int i = 1; i < argc; i++) {
 		// Usage menu
 		if (strcmp("-h", argv[i]) == 0 || strcmp("--help", argv[i]) == 0) {
-			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT] [--verbose] [--drop-late]\n");
+			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-users USER_COUNT] [--verbose] [--drop-late]\n");
 			exit(0);
 		}
 
@@ -97,23 +97,23 @@ int parse_args(int argc, char *argv[]) {
 			settings.server.sin_port = htons((uint16_t)port);
 		}
 
-		else if (strcmp("--max-players", argv[i]) == 0) {
+		else if (strcmp("--max-users", argv[i]) == 0) {
 			// Missing arg
 			if (++i == argc) {
-				fprintf(stderr, "Missing max player count\n");
+				fprintf(stderr, "Missing max user count\n");
 				return -1;
 			}
 
 			char *end;
 			long int n = strtol(argv[i], &end, 10);
 			
-			// Invalid player count
+			// Invalid user count
 			if (n < 1 || n > MAX_CONNECTIONS || *end != '\0') {
-				fprintf(stderr, "Invalid max player count (Must be %d-%d)\n", 1, MAX_CONNECTIONS);
+				fprintf(stderr, "Invalid max user count (Must be %d-%d)\n", 1, MAX_CONNECTIONS);
 				return -1;
 			}
 
-			settings.max_players = (int)n;
+			settings.max_users = (int)n;
 		}
 
 		// verbose logging / devlogs
@@ -126,7 +126,7 @@ int parse_args(int argc, char *argv[]) {
 	
 		else {
 			fprintf(stderr, "Invalid argument \"%s\"\n", argv[i]);
-			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-players PLAYER_COUNT]\n");
+			fprintf(stdout, "usage: ./server [-h] [--port PORT] [--max-users PLAYER_COUNT]\n");
 			return -1;
 		}
 	}
@@ -182,7 +182,7 @@ void* reaper_thread(void *arg) {
 			sem_wait(client_cleanup_sem);
 
 			// Ensures reaper does not infinitely sleep upon shutdown with no clients
-			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_players) == 0)
+			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_users) == 0)
 				break;
 		}
 		
@@ -203,13 +203,13 @@ void* reaper_thread(void *arg) {
 				pthread_mutex_unlock(&clients_mutex);
 	
 				// Prints user disconnected
-                                errlog("Reaper", "--DISCONNECT--", -1, -1, "Player dc", ct->net_msg.username);
+                                errlog("Reaper", "--DISCONNECT--", -1, -1, "User dc", ct->net_msg.username);
 				
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
 	
-				// Updates global connected_players counter	
-				atomic_fetch_sub(&settings.connected_players, 1);	
+				// Updates global connected_users counter	
+				atomic_fetch_sub(&settings.connected_users, 1);	
 				pthread_mutex_lock(&clients_mutex);
 			}
 				
@@ -291,12 +291,9 @@ void* client_io_thread(void* arg) {
 			if (pfd.revents & POLLIN) {
 				int result = 0;
 				if ((result = full_read(io_fd, &buf, 1)) != 0) {
-					if (result == EOF) 
-						errlog("Client", "read", io_fd, result, "User dc (EOF)", buf.username);
+					const char* err_status = (result == EOF) ? "User dc (EOF)" : "N/A";
 					
-					else 
-						errlog("Client", "read", io_fd, result, "N/A", buf.username);
-					
+					errlog("Client", "read", io_fd, result, err_status, buf.username);
 					
 					atomic_store(&ct->finished, true);
 					break;
@@ -309,7 +306,7 @@ void* client_io_thread(void* arg) {
 
 				switch ((message_type_t)buf.type) {
 					case LOGIN:
-						errlog("Client", "--JOIN--", -1, -1, "Player connected", buf.username);
+						errlog("Client", "--JOIN--", -1, -1, "User connected", buf.username);
 						break;
 					case UPDATE_MESSAGE:
 						break;
@@ -356,7 +353,7 @@ void* client_io_thread(void* arg) {
 
 				int result = 0;
 				if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
-					errlog("Client", "write", io_fd, result, "Player dc", buf.username);
+					errlog("Client", "write", io_fd, result, "User dc", buf.username);
 					atomic_store(&ct->finished, true);
 					break;
 				}
@@ -434,7 +431,7 @@ int main (int argc, char *argv[]) {
 	}
 
 	// Starts listening on socket
-	while (listen(settings.socket_fd, settings.max_players) == -1) {
+	while (listen(settings.socket_fd, settings.max_users) == -1) {
 		if (errno == EINTR)
 			continue;
 		perror("Error while attmepting to listen on socket");
@@ -463,7 +460,7 @@ int main (int argc, char *argv[]) {
 	// Server is "running"
 	atomic_store(&settings.running, true);
         fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
-        fprintf(stdout, "Max players: %d\n", settings.max_players);
+        fprintf(stdout, "Max users: %d\n", settings.max_users);
         fflush(stdout);
 	
 
@@ -502,7 +499,7 @@ int main (int argc, char *argv[]) {
 			break;
 
 		// Server is full
-		if (atomic_load(&settings.connected_players) >= settings.max_players) {
+		if (atomic_load(&settings.connected_users) >= settings.max_users) {
 			send_by_type(client_fd, LOGOUT);
 			shutdown(client_fd, SHUT_RDWR);
 			close(client_fd);
@@ -529,7 +526,7 @@ int main (int argc, char *argv[]) {
 		
 		// Creates thread & starts IO	
 		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0)
-			atomic_fetch_add(&settings.connected_players, 1);
+			atomic_fetch_add(&settings.connected_users, 1);
 
 		
 		// Failed to create thread			
