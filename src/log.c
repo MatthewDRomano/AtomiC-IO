@@ -29,7 +29,7 @@ static void* perform_logging(void* arg);
 // write_log_entry() waits on this sem 
 static sem_t* log_sem; 
 static pthread_t log_thread;
-static atomic_bool log_open = ATOMIC_VAR_INIT(false);
+static atomic_bool log_open = false;
 
 
 // Log entry with error format

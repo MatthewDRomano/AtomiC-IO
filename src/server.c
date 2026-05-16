@@ -31,10 +31,10 @@ typedef struct client_thread {
 	user_data_t net_msg;
 	atomic_bool finished;
 	
-	struct client_thread *next;
+	struct client_thread* next;
 } client_thread_t;
 
-static client_thread_t *clients = NULL;
+static client_thread_t* clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sem_t* client_cleanup_sem;
 
@@ -60,8 +60,8 @@ void init_def_settings() {
 	settings.server.sin_addr.s_addr = INADDR_ANY;
 
 	settings.socket_fd = 0;
-	settings.connected_users = ATOMIC_VAR_INIT(0);
-	settings.running = ATOMIC_VAR_INIT(false);
+	settings.connected_users = 0;
+	settings.running = false;
 	settings.max_users = MAX_CONNECTIONS;
 	settings.devlogs_enabled = false;
 	settings.drop_late_packets = false;
@@ -69,7 +69,7 @@ void init_def_settings() {
 
 
 
-int parse_args(int argc, char *argv[]) {
+int parse_args(int argc, char* argv[]) {
 	
 	for (int i = 1; i < argc; i++) {
 		// Usage menu
@@ -85,7 +85,7 @@ int parse_args(int argc, char *argv[]) {
 				return -1;
 			}
 			
-			char *end;
+			char* end;
 			long int port = strtol(argv[i], &end, 10);
 			
 			// Invalid Port
@@ -104,7 +104,7 @@ int parse_args(int argc, char *argv[]) {
 				return -1;
 			}
 
-			char *end;
+			char* end;
 			long int n = strtol(argv[i], &end, 10);
 			
 			// Invalid user count
@@ -138,7 +138,7 @@ int parse_args(int argc, char *argv[]) {
 // Checks for finished clients to remove / needs mutex
 bool has_dead_clients() {
 	pthread_mutex_lock(&clients_mutex);
-	client_thread_t *ct = clients;
+	client_thread_t* ct = clients;
 	while (ct != NULL) {
 		if (atomic_load(&ct->finished)) {
 			pthread_mutex_unlock(&clients_mutex);
@@ -173,7 +173,7 @@ void cleanup_client(client_thread_t* ct) {
 
 // Handles cleaning up client_thread_t resources when set to finished
 // Mutex unneeded in practice since reap occurs after client is removed from global list 'clients'
-void* reaper_thread(void *arg) {
+void* reaper_thread(void* arg) {
 	
 	while(atomic_load(&settings.running)) {
 	
@@ -192,10 +192,10 @@ void* reaper_thread(void *arg) {
 
 		// Mutex ensures a dead client is removed before other threads access clients list
 		pthread_mutex_lock(&clients_mutex);
-		client_thread_t **pp = &clients;
+		client_thread_t** pp = &clients;
 		
 		while (*pp != NULL) {
-			client_thread_t *ct = *pp;
+			client_thread_t* ct = *pp;
 			
 			if (atomic_load(&ct->finished)) {
 				// Removes client from clients list
@@ -230,7 +230,7 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 	const size_t n = sizeof(user_data_t);
 	int i = 0;
 
-	client_thread_t *c = clients;
+	client_thread_t* c = clients;
 	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL && i < MAX_CONNECTIONS) {
 		memcpy(msg + (i++), &c->net_msg, n);
@@ -255,7 +255,7 @@ uint64_t now_ms() {
 
 // Performs IO with client
 void* client_io_thread(void* arg) {	
-	client_thread_t *ct = (client_thread_t*)arg;	
+	client_thread_t* ct = (client_thread_t*)arg;	
 
 	struct pollfd pfd;
 
@@ -386,7 +386,7 @@ void shutdown_handler(int signum) {
 	//close(settings.socket_fd); // Interrupts accept()
 }
 
-int main (int argc, char *argv[]) {
+int main (int argc, char* argv[]) {
 	
 	// Handles termination	
 	struct sigaction shutdown_sa = {0};
@@ -507,7 +507,7 @@ int main (int argc, char *argv[]) {
 		}
 
 		// Create new client once accepted
-		client_thread_t *ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
+		client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
 		if (!ct) {
 			errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
 			close(client_fd);
@@ -550,7 +550,7 @@ int main (int argc, char *argv[]) {
 	
 	// Server is closing / finishes all threads for reaper to join
 	// Sends logout message
-	client_thread_t *c = clients;
+	client_thread_t* c = clients;
 	pthread_mutex_lock(&clients_mutex);
 	while (c != NULL) {
 		//send_by_type(c->client_fd, LOGOUT);
