@@ -31,10 +31,10 @@ typedef struct client_thread {
 	user_data_t net_msg;
 	atomic_bool finished;
 	
-	struct client_thread* next;
+	_Atomic(struct client_thread*) next; // Atomic ptr
 } client_thread_t;
 
-static client_thread_t* clients = NULL;
+static _Atomic(client_thread_t*) clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sem_t* client_cleanup_sem;
 
@@ -137,17 +137,14 @@ int parse_args(int argc, char* argv[]) {
 
 // Checks for finished clients to remove / needs mutex
 bool has_dead_clients() {
-	pthread_mutex_lock(&clients_mutex);
-	client_thread_t* ct = clients;
+	client_thread_t* ct = atomic_load(&clients);
 	while (ct != NULL) {
-		if (atomic_load(&ct->finished)) {
-			pthread_mutex_unlock(&clients_mutex);
+		if (atomic_load(&ct->finished)) 
 			return true;
-		}
-		ct = ct->next;
+
+		ct = (client_thread_t*)atomic_load(&ct->next);
 	}
 	
-	pthread_mutex_unlock(&clients_mutex);
 	return false;
 }
 
@@ -162,9 +159,7 @@ void cleanup_client(client_thread_t* ct) {
         //	//ct->client_fd = -1;
 
 	// Avoids deadlock in other threads if join stalls
-        //pthread_mutex_unlock(&clients_mutex);
         pthread_join(ct->thread, NULL);
-        //pthread_mutex_lock(&clients_mutex);
 
         // Frees associated memory / only after client thread ends
         free(ct);
@@ -192,19 +187,23 @@ void* reaper_thread(void* arg) {
 
 		// Mutex ensures a dead client is removed before other threads access clients list
 		pthread_mutex_lock(&clients_mutex);
-		client_thread_t** pp = &clients;
-		
-		while (*pp != NULL) {
-			client_thread_t* ct = *pp;
-			
+
+		// pp tracks list element addresses (manages list), ct is atomically loaded client_thread_t
+		_Atomic(client_thread_t*)* pp = &clients;
+		client_thread_t* ct = (client_thread_t*)atomic_load(pp);
+
+		while (ct != NULL) {
 			if (atomic_load(&ct->finished)) {
+	
 				// Removes client from clients list
-				*pp = ct->next;
+				client_thread_t* next_node = (client_thread_t*)atomic_load(&ct->next);
+        			atomic_store(pp, next_node); // Equivalent to &(*pp)
+				
 				pthread_mutex_unlock(&clients_mutex);
 	
 				// Prints user disconnected
                                 errlog("Reaper", "--DISCONNECT--", -1, -1, "User dc", ct->net_msg.username);
-				
+	
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
 	
@@ -213,8 +212,11 @@ void* reaper_thread(void* arg) {
 				pthread_mutex_lock(&clients_mutex);
 			}
 				
-			else
+			else {
 				pp = &ct->next;
+			}
+			
+			ct = atomic_load(pp);
 
 		}
 		
@@ -230,11 +232,11 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 	const size_t n = sizeof(user_data_t);
 	int i = 0;
 
-	client_thread_t* c = clients;
 	pthread_mutex_lock(&clients_mutex);
+	client_thread_t* c = (client_thread_t*)atomic_load(&clients);
 	while (c != NULL && i < MAX_CONNECTIONS) {
 		memcpy(msg + (i++), &c->net_msg, n);
-		c = c->next;
+		c = (client_thread_t*)atomic_load(&c->next);
 	}
 	pthread_mutex_unlock(&clients_mutex);
 	
@@ -348,8 +350,7 @@ void* client_io_thread(void* arg) {
 					continue;
 			
 				// ON TIME
-				else
-					last_send_time = now_ms();
+				last_send_time = now_ms();
 
 				int result = 0;
 				if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
@@ -440,7 +441,11 @@ int main (int argc, char* argv[]) {
 
 
 	// Creates semaphore w/ owner read / write, otherwise read only
-	client_cleanup_sem = sem_open("/client_cleanup_sem", O_CREAT, 0644, 1);
+	client_cleanup_sem = sem_open("/client_cleanup_sem", O_CREAT, 0644, 0);
+	if (client_cleanup_sem == SEM_FAILED) {
+		perror("Failed to create client cleanup semaphore");
+		goto err_close_socket;	
+	}
 	// Unlinks named semaphore from kernel 
 	// Semaphore now persists for server lifetime instead of in kernel indefinitely
 	sem_unlink("/client_cleanup_sem");
@@ -516,29 +521,27 @@ int main (int argc, char* argv[]) {
 		
 		// Sets file descriptor
 		ct->client_fd = client_fd;
-                ct->finished = ATOMIC_VAR_INIT(false);	
+                ct->finished = false;	
 		
-		// Adds client to front of global list / Ensures no race
-		pthread_mutex_lock(&clients_mutex);
-                ct->next = clients;
-                clients = ct;
-                pthread_mutex_unlock(&clients_mutex);
-		
+			
 		// Creates thread & starts IO	
-		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0)
+		if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
+			// PUBLISHES TO CLIENTS ONLY ON SUCCESS
+			client_thread_t* old_head;
+			do {
+                        	old_head = (client_thread_t*)atomic_load(&clients);
+			        atomic_store(&ct->next, old_head);
+			        // Indivisible swap if the head hasn't changed / acts as MIPS load-linked & store-conditional
+			} while (!atomic_compare_exchange_weak(&clients, &old_head, ct));
+	
 			atomic_fetch_add(&settings.connected_users, 1);
-
+		}
 		
-		// Failed to create thread			
+		// Failed to create thread (before adding to global list)	
 		else {
 			errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
-			
+		
 			// Manual cleanup since we cannot reap a nonexistent thread
-			pthread_mutex_lock(&clients_mutex);
-			if (clients == ct)
-				clients = ct->next;
-			pthread_mutex_unlock(&clients_mutex);
-
 			close(client_fd);
 			free(ct);
 		}
@@ -550,12 +553,12 @@ int main (int argc, char* argv[]) {
 	
 	// Server is closing / finishes all threads for reaper to join
 	// Sends logout message
-	client_thread_t* c = clients;
 	pthread_mutex_lock(&clients_mutex);
+	client_thread_t* c = (client_thread_t*)atomic_load(&clients);
 	while (c != NULL) {
 		//send_by_type(c->client_fd, LOGOUT);
 		atomic_store(&c->finished, true);
-		c = c->next;
+		c = (client_thread_t*)atomic_load(&c->next);
 	}
 
 	pthread_mutex_unlock(&clients_mutex);
