@@ -18,7 +18,7 @@
 #include <fcntl.h>
 #include <time.h>
 
-#include "anera_net.h"
+#include "at_net.h"
 #include "log.h"
 
 #define MIN_PORT 1024
@@ -135,8 +135,9 @@ int parse_args(int argc, char* argv[]) {
 }
 
 
-// Checks for finished clients to remove / needs mutex
+// Checks for finished clients to remove
 bool has_dead_clients() {
+	// Grabs a snapshot of the current list (list cannot be changed during loop as this method halts reaper)
 	client_thread_t* ct = atomic_load(&clients);
 	while (ct != NULL) {
 		if (atomic_load(&ct->finished)) 
@@ -185,42 +186,41 @@ void* reaper_thread(void* arg) {
 			; // Drains client_cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
-		// Mutex ensures a dead client is removed before other threads access clients list
-		pthread_mutex_lock(&clients_mutex);
 
 		// pp tracks list element addresses (manages list), ct is atomically loaded client_thread_t
 		_Atomic(client_thread_t*)* pp = &clients;
 		client_thread_t* ct = (client_thread_t*)atomic_load(pp);
 
 		while (ct != NULL) {
-			if (atomic_load(&ct->finished)) {
-	
-				// Removes client from clients list
+			// Removes client from clients list
+			if (atomic_load(&ct->finished)) {	
 				client_thread_t* next_node = (client_thread_t*)atomic_load(&ct->next);
-        			atomic_store(pp, next_node); // Equivalent to &(*pp)
 				
+				// Mutex ensures a dead client is removed before other threads access clients list
+				pthread_mutex_lock(&clients_mutex);
+				if (!atomic_compare_exchange_weak(pp, &ct, next_node)) {
+					ct = (client_thread_t*)atomic_load(pp);
+					pthread_mutex_unlock(&clients_mutex);
+					continue;
+				}
 				pthread_mutex_unlock(&clients_mutex);
 	
-				// Prints user disconnected
-                                errlog("Reaper", "--DISCONNECT--", -1, -1, "User dc", ct->net_msg.username);
+                               	errlog("Reaper", "--DISCONNECT--", -1, -1, "User dc", ct->net_msg.username);
 	
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
-	
-				// Updates global connected_users counter	
 				atomic_fetch_sub(&settings.connected_users, 1);	
-				pthread_mutex_lock(&clients_mutex);
+	
 			}
 				
 			else {
 				pp = &ct->next;
 			}
 			
-			ct = atomic_load(pp);
+			ct = (client_thread_t*)atomic_load(pp);
 
 		}
 		
-		pthread_mutex_unlock(&clients_mutex);
 	}	
 
 	return NULL;
@@ -345,7 +345,7 @@ void* client_io_thread(void* arg) {
 				}
 
 				// Too early
-				// NETWORK_TRANSFER_PERIOD defined in anera_net.h 
+				// NETWORK_TRANSFER_PERIOD defined in at_net_net.h 
 				else if (delay < NETWORK_TRANSFER_PERIOD)
 					continue;
 			
@@ -535,6 +535,11 @@ int main (int argc, char* argv[]) {
 			} while (!atomic_compare_exchange_weak(&clients, &old_head, ct));
 	
 			atomic_fetch_add(&settings.connected_users, 1);
+			
+			// Prevents a client from potentially avoiding reaper 
+			// Exact Situation: Client finishes and calls sem_post() before the reaper can see client in the list (pthread_Create() before adding to list)
+			if (atomic_load(&ct->finished))
+				sem_post(client_cleanup_sem);
 		}
 		
 		// Failed to create thread (before adding to global list)	

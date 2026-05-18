@@ -17,7 +17,7 @@
 #include <semaphore.h>
 #include <fcntl.h>
 
-#include "anera_net.h"
+#include "at_net.h"
 #include "log.h"
 
 
@@ -75,7 +75,7 @@ int parse_args(int argc, char* argv[]) {
 				return -1;
 			}
 			
-			// Upper bound username size declared in anera_net.h	
+			// Upper bound username size declared in at_net.h	
 			snprintf(client_info.username, CLIENT_USERNAME_SIZE, "%s", argv[i]);
 			username_set = true;
 		}
