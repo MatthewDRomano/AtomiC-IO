@@ -14,7 +14,6 @@
 #include <pthread.h>
 #include <math.h>
 #include <stdatomic.h>
-#include <semaphore.h>
 #include <fcntl.h>
 
 #include "at_net.h"
@@ -31,7 +30,6 @@ static pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static user_data_t client_info = {0};
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
-static sem_t* send_sem;
 
 typedef struct settings {
         struct sockaddr_in server;
@@ -189,9 +187,9 @@ void* recv_thread(void *arg) {
 		
 		pthread_mutex_lock(&users_mutex);
 		memcpy(users, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
-		message_type_t type = (message_type_t)users[0].type;
 		pthread_mutex_unlock(&users_mutex);	
-	
+		
+		message_type_t type = (message_type_t)buf[0].type;	
 		switch (type) {
 			case LOGOUT:
 				errlog("Recv", "msg parse", settings.socket_fd, -1, "Disconnect msg recv", client_info.username);
@@ -210,6 +208,10 @@ void* recv_thread(void *arg) {
 }
 
 void* send_thread(void *arg) {	
+	struct timespec ts;
+	ts.tv_sec = 0;
+	ts.tv_nsec = NETWORK_TRANSFER_PERIOD * 1000000; // 25 ms
+	
 	while (atomic_load(&settings.connected)) {
 		
 		int result = 0;
@@ -219,13 +221,7 @@ void* send_thread(void *arg) {
 			break;
 		}
 		
-		// Wait for at least one signal
-		sem_wait(send_sem);
-	
-		// Handles if multiple signals	
-		while (sem_trywait(send_sem) == 0) {
-            		; /* drain the counter so only most recent client info is sent */
-        	}	
+        	nanosleep(&ts, NULL);
 	}
 
 	return NULL;
@@ -280,13 +276,6 @@ int main(int argc, char* argv[]) {
         send_by_type(settings.socket_fd, LOGIN);
 
 
-	// Creates semaphore w/ owner read / write, otherwise read only
-	send_sem = sem_open("/send_sem", O_CREAT, 0644, 1);
-	// Unlinks named semaphore from kernel
-	// Semaphore now persists for server lifetime instead of in kernel indefinitely
-	sem_unlink("/send_sem");
-
-
 	if (init_log(client_info.username) == -1)
                 goto err_close_log;
 
@@ -317,19 +306,15 @@ int main(int argc, char* argv[]) {
 		}
 
 
-		sem_post(send_sem); // tells send thread client updated
 		sleep(1);		
 	}
-	
 	shutdown(settings.socket_fd, SHUT_RDWR);
 	
 	err_kill_recv_thread:
         pthread_join(recv_tid, NULL);
 
 	err_kill_send_thread:
-	sem_post(send_sem); // Ends blocking wait in send thread
 	pthread_join(send_tid, NULL);
-	sem_close(send_sem);
 	
 	err_close_log:
 	end_log();

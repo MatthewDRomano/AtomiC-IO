@@ -5,6 +5,10 @@ A high-performance broadcast server model designed as a generic, lock-minimal fr
 ### The Problem
 Traditional broadcast servers often suffer from "Global Lock Contention," where a single thread sending a message to all users freezes the entire client list. This architecture prevents new connections or resource cleanup until the I/O is finished, causing significant latency spikes as the user count grows.
 
+### Solution
+AtomiC-IO solves this by allowing simultaneous client connection, data receiving/broadcast, and resource cleanup through efficient asymmetrical concurrency. 
+
+
 ### Features
 * **Generic Broadcast Architecture**: Provides a reusable blueprint for 1-to-N message distribution across concurrent TCP streams.
 * **Lock-Free Ingestion**: Utilizes `atomic_compare_exchange_weak` so the main thread can accept new users even while broadcasts or cleanup are in progress.

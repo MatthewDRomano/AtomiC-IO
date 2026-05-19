@@ -276,13 +276,28 @@ void* client_io_thread(void* arg) {
 	user_data_t buf;
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
-        	pfd.events = POLLIN | POLLOUT;
-		
-		// Waits indiefinitely for ability to write / available data to read from client socket
-		int ready = poll(&pfd, 1, -1);
-
-		if (ready > 0) {
+        	pfd.events = POLLIN;
+	
+		uint64_t now = now_ms();
+		uint64_t elapsed = now - last_send_time;
+		int timeout_ms = 0;
+		if (elapsed < NETWORK_TRANSFER_PERIOD) {
+			timeout_ms = (int)(NETWORK_TRANSFER_PERIOD - elapsed);
+		}
 			
+		// Waits for available data to read from client socket or if it is time to send data
+		int ret = poll(&pfd, 1, timeout_ms);
+		
+		// Error during poll()
+		if (ret < 0)
+                        if (errno != EINTR) {
+                                errlog("Client", "poll", io_fd, errno, "N/A", buf.username);
+                                atomic_store(&ct->finished, true);
+                                break;
+                        }
+
+		if (ret > 0) {
+			// Socket err	
 			if (pfd.revents & (POLLHUP | POLLERR)) {
 				send_by_type(io_fd, LOGOUT);
 				atomic_store(&ct->finished, true);
@@ -319,60 +334,36 @@ void* client_io_thread(void* arg) {
 				}	
 			}
 		
-			// Writes to client
-			if (pfd.revents & POLLOUT) {
-					
-				// NETWORK DELAY CHECK
-				uint64_t delay = now_ms() - last_send_time;
-				float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
-
-				if (delay > PACKET_DROP_THRESHOLD) {
-    					if (settings.devlogs_enabled) {
-        					// Determine status tag based on policy
-        					const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
-        
-        					char msg[128];
-        					snprintf(msg, 128, "%s: %.3fx Latency %s", 
-                 					buf.username, latency_ratio, status);
-        
-        					msglog(msg);
-    					}
-
-    					if (settings.drop_late_packets) {
-        					last_send_time = now_ms();
-						continue; 
-					}
-				}
-
-				// Too early
-				// NETWORK_TRANSFER_PERIOD defined in at_net_net.h 
-				else if (delay < NETWORK_TRANSFER_PERIOD)
-					continue;
-			
-				// ON TIME
-				last_send_time = now_ms();
-
-				int result = 0;
-				if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
-					errlog("Client", "write", io_fd, result, "User dc", buf.username);
-					atomic_store(&ct->finished, true);
-					break;
-				}
-				
-			}
-
-				
-			
 		}
 		
-		// Error occurred during poll()
-		else if (ready < 0)
-			if (errno != EINTR) {
-				errlog("Client", "poll", io_fd, errno, "N/A", buf.username);
-				atomic_store(&ct->finished, true);
-				break;
+		now = now_ms();
+		uint64_t delay;
+		if ((delay = (now - last_send_time)) >= NETWORK_TRANSFER_PERIOD) {
+			// Devlogs for late packets
+			float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
+			if (delay >= PACKET_DROP_THRESHOLD && settings.devlogs_enabled) {
+				// Determine status tag based on policy
+				const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
+				char msg[128];
+				snprintf(msg, 128, "%s: %.3fx Latency %s", buf.username, latency_ratio, status);
+				msglog(msg);
 			}
-	
+			
+			// Drop packets if specified
+			if (delay >= PACKET_DROP_THRESHOLD && settings.drop_late_packets) {
+				last_send_time = now_ms();
+				continue;
+			}
+			
+			// Send to client	
+			last_send_time = now;
+			int result = 0;
+                        if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
+        	                errlog("Client", "write", io_fd, result, "User dc", buf.username);
+                                atomic_store(&ct->finished, true);
+                                break;
+                        }
+		}
 	}
 	
 	close(io_fd);
@@ -389,9 +380,10 @@ void shutdown_handler(int signum) {
 
 int main (int argc, char* argv[]) {
 	
-	// Handles termination	
+	// Handles termination / def flags
 	struct sigaction shutdown_sa = {0};
 	shutdown_sa.sa_handler = shutdown_handler;
+	sigemptyset(&shutdown_sa.sa_mask); // Init mask to empty
 	
 	sigaction(SIGINT, &shutdown_sa, NULL);
 	sigaction(SIGTERM, &shutdown_sa, NULL);
@@ -505,7 +497,7 @@ int main (int argc, char* argv[]) {
 
 		// Server is full
 		if (atomic_load(&settings.connected_users) >= settings.max_users) {
-			send_by_type(client_fd, LOGOUT);
+			//send_by_type(client_fd, LOGOUT); // THIS IS EXPENSIVE / TIME CONSUMING FOR SOMEONE NOT EVEN CONNECTED (abusable aswell)
 			shutdown(client_fd, SHUT_RDWR);
 			close(client_fd);
 			continue;

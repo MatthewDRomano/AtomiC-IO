@@ -106,7 +106,6 @@ int init_log(char* name) {
 		// Error spawning log thread
 		fprintf(stderr, "Error spawning log thread\n");
 		atomic_store(&log_open, false);
-		free(log_head);
 		sem_close(log_sem);	
 		return -1;
 	}
@@ -119,11 +118,23 @@ int end_log() {
 	if (!atomic_load(&log_open)) 
 		return -1;
 
+	// Prevents new log entries
 	// Wakes up log thread -> terminates -> joins
 	atomic_store(&log_open, false);
 	sem_post(log_sem);	
 	pthread_join(log_thread, NULL);
 
+	// Safety drain of any leaked log_entries
+	// No new nodes / no active logging thread allows for no mutex needed
+	log_entry_t* current = log_head->next_entry;
+	while (current != NULL) {
+		log_entry_t* prev = current;
+		current = current->next_entry;
+		free(prev);
+	}
+	
+	// Resets nodes in case of reinitializing a log
+	dummy_node.next_entry = NULL;
 	sem_close(log_sem);
 	return 0;
 }
@@ -157,6 +168,12 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
 
 	// Waits for potential other threads to finish adding new entry
 	pthread_mutex_lock(&queue_mutex);
+	// Final check to ensure log isn't mid shutdown
+	if (!atomic_load(&log_open)) {
+                pthread_mutex_unlock(&queue_mutex);
+                free(new_entry); // Safely discard the allocated node
+                return -1;
+        }
 	log_entry_t* prev = log_tail;
 	log_tail = new_entry;
 	prev->next_entry = log_tail;
@@ -187,6 +204,12 @@ int msglog(char* msg) {
 	
 	// Waits for potential other threads to finish adding new entry	
 	pthread_mutex_lock(&queue_mutex);
+	// Final check to ensure log isn't mid shutdown
+	if (!atomic_load(&log_open)) {
+    		pthread_mutex_unlock(&queue_mutex);
+    		free(new_entry); // Safely discard the allocated node
+ 		return -1;
+	}
 	log_entry_t* prev = log_tail;
         log_tail = new_entry;
         prev->next_entry = log_tail;
