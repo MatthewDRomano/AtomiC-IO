@@ -12,14 +12,18 @@
 #define PACKET_DROP_THRESHOLD (NETWORK_TRANSFER_PERIOD * 2)
 
 
-// Message type identifier
+/**
+ * Message type identifer
+ */ 
 typedef enum {
 	LOGIN,
 	LOGOUT,
 	UPDATE_MESSAGE
 } message_type_t;
 
-// Network safe user info struct
+/**
+ *  Network safe packet structure for server/client IO
+ */  
 typedef struct __attribute__((packed)) {
 	uint8_t type;
 	char username[CLIENT_USERNAME_SIZE];
@@ -27,7 +31,9 @@ typedef struct __attribute__((packed)) {
 	uint16_t pos_x, pos_y;
 } user_data_t;
 
-// Shared client / server IO methods
+/**
+ * Standardized read / write protocols for both server and clients
+ */ 
 int full_read(int socket_fd, user_data_t* user_info, int users);
 int full_write(int socket_fd, user_data_t* user_info, int users);
 

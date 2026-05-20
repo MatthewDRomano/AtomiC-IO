@@ -10,9 +10,9 @@
 typedef struct {
 	uint16_t port;			// Active binding port
 	int max_users;			// Limit of simultaneous connections
-	bool devlogs_enabled;		// Verbose server-performance logging 
+	bool devlogs_enabled;		// Verbose server-performance logging flag
 	bool drop_late_packets;		// Policy for handling latency
-	const char* server_ID;		// Base prefix string for output log file
+	const char* log_path;		// Desired path for logging - Must be null-terminated
 } atomicio_config_t;
 
 // ========================================================
@@ -22,7 +22,7 @@ typedef struct {
 /**
  * Configures the internal server structure and sets socket parameters,
  * and initiates server log thread.
- * At this point, atomicio_shutdown() needs to be called to cleanup server resources.
+ * After this point, atomicio_shutdown() will need to be called eventually to cleanup server resources.
  */ 
 int atomicio_init_server(const atomicio_config_t* init_settings);
 
@@ -73,4 +73,5 @@ uint64_t atomicio_get_dropped_packets_count(void);
  * Thread-safe logging option allowing custom message control for the user.
  */ 
 void atomicio_log(char* msg);
+
 #endif
