@@ -23,19 +23,18 @@ typedef enum {
 
 /**
  *  Network safe packet structure for server/client IO
- *  htons / htonl needed for fields accordingly
  */  
 typedef struct __attribute__((packed)) {
 	uint8_t type;
 	char username[CLIENT_USERNAME_SIZE];
-	uint32_t ID;		
+	uint32_t ID;
 	uint16_t pos_x, pos_y;
-} packet_t;
+} user_data_t;
 
 /**
  * Standardized read / write protocols for both server and clients
  */ 
-int full_read(int socket_fd, packet_t* user_data, int users);
-int full_write(int socket_fd, packet_t* user_data, int users);
+int full_read(int socket_fd, user_data_t* user_info, int users);
+int full_write(int socket_fd, user_data_t* user_info, int users);
 
 #endif

@@ -32,6 +32,8 @@ int errlog(const char* thread,
 
 
 // Used to log info / track response time
+// msg is internally bounds checked and auto null terminated
+// so msg can safely be passed as any length
 int msglog(char* msg);
 
 #endif

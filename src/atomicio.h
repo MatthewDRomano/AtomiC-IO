@@ -22,13 +22,13 @@ typedef struct {
 /**
  * Configures the internal server structure and sets socket parameters,
  * and initiates server log thread.
- * After this point, atomicio_shutdown() will need to be called eventually to cleanup server resources.
+ * If succesful, atomicio_shutdown() will need to be called eventually to cleanup server resources.
  */ 
 int atomicio_init_server(const atomicio_config_t* init_settings);
 
 /**
  * Executes the main blocking client accept loop.
- * Call this after initialization to boot the server application.
+ * Call this after a successful initialization to boot the server application.
  */ 
 int atomicio_run(void);
 
@@ -37,7 +37,7 @@ int atomicio_run(void);
  * Shutdown order: Shutdown flags set, Signal reaper thread to cleanup client resources,
  * close all open connections, flush remaining log entries, and close log.
  */ 
-void atomicio_shutdown(void);
+int atomicio_shutdown(void);
 
 
 // ========================================================

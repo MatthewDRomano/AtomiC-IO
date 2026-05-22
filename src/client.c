@@ -24,11 +24,11 @@
 
 
 
-// Holds MAX_CONNECTIONS slots of user_data_t. Unused slots store 0 and are ignored
-static user_data_t users[MAX_CONNECTIONS] = {0};
+// Holds MAX_CONNECTIONS slots of packet_t. Unused slots store 0 and are ignored
+static packet_t users[MAX_CONNECTIONS] = {0};
 static pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static user_data_t client_info = {0};
+static packet_t client_info = {0};
 static pthread_mutex_t client_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct settings {
@@ -160,10 +160,10 @@ int parse_args(int argc, char* argv[]) {
 
 // Assumes clients mutex unlocked
 int send_by_type(int sock_fd, message_type_t msg_type) {
-	user_data_t msg;
+	packet_t msg;
 
 	pthread_mutex_lock(&client_mutex);
-	memcpy(&msg, &client_info, sizeof(user_data_t));
+	memcpy(&msg, &client_info, sizeof(packet_t));
 	pthread_mutex_unlock(&client_mutex);
 
 	msg.type = (uint8_t)msg_type;
@@ -174,7 +174,7 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 void* recv_thread(void *arg) {
 	while (atomic_load(&settings.connected)) {
 		int result = 0;
-		user_data_t buf[MAX_CONNECTIONS];
+		packet_t buf[MAX_CONNECTIONS];
 
 		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
 			const char* err_status = (result == EOF) ? "EOF" : "N/A";
@@ -186,7 +186,7 @@ void* recv_thread(void *arg) {
 		}
 		
 		pthread_mutex_lock(&users_mutex);
-		memcpy(users, buf, sizeof(user_data_t) * MAX_CONNECTIONS);
+		memcpy(users, buf, sizeof(packet_t) * MAX_CONNECTIONS);
 		pthread_mutex_unlock(&users_mutex);	
 		
 		message_type_t type = (message_type_t)buf[0].type;	
