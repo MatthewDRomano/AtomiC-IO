@@ -26,6 +26,7 @@
 #define MAX_PORT 49151
 #define CLIENT_STACK (1024 * 1024)  // 1 MB
 
+
 typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
@@ -49,11 +50,16 @@ typedef struct {
 	struct sockaddr_in server;
 	bool devlogs_enabled;
 	bool drop_late_packets;
-	char* log_path;
+	char log_path[MAX_PATH_LEN];
 } settings_t;
 
 // Internal settings struct / fields set to 0
 static settings_t settings = {0};
+// Global server metadata
+static _Atomic(uint64_t) server_start_timestamp;
+static _Atomic(uint64_t) packets_dropped;
+static _Atomic(uint64_t) late_packets;
+static _Atomic(float) total_latency;
 
 // Atomic shutdown flag - thread safe and natively lock-free (async safe) on most systems
 static _Atomic bool shutdown_requested = false;
@@ -61,7 +67,7 @@ static _Atomic bool shutdown_requested = false;
 
 
 // Checks for finished clients to remove
-bool has_dead_clients() {
+static bool has_dead_clients() {
 	// Grabs a snapshot of the current list (list cannot be changed during loop as this method halts reaper)
 	client_thread_t* ct = atomic_load(&clients);
 	while (ct != NULL) {
@@ -77,7 +83,7 @@ bool has_dead_clients() {
 
 // Signals socket connection shutdown / frees allocated client memory
 // Mutex not needed, *ct assumed to be removed from global list prior to call
-void cleanup_client(client_thread_t* ct) {
+static void cleanup_client(client_thread_t* ct) {
 
 	// Closes connection & fd / ensures client thread ends
 	shutdown(ct->client_fd, SHUT_RDWR);
@@ -93,7 +99,7 @@ void cleanup_client(client_thread_t* ct) {
 
 
 // Handles cleaning up client_thread_t resources when set to finished
-void* reaper_thread(void* arg) {
+static void* reaper_thread(void* arg) {
 	
 	while(atomic_load(&settings.running)) {
 	
@@ -128,8 +134,10 @@ void* reaper_thread(void* arg) {
 					continue;
 				}
 				pthread_mutex_unlock(&clients_mutex);
-	
-                               	errlog("Reaper", "--DISCONNECT--", -1, -1, "User dc", ct->net_msg.username);
+
+				/*char cleanup_msg[MAX_MSG_LEN];
+                                snprintf(cleanup_msg, MAX_MSG_LEN, "Client Successfully Reaped: %s", ct->net_msg.username);
+                                msglog(cleanup_msg);*/
 	
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
@@ -151,7 +159,7 @@ void* reaper_thread(void* arg) {
 }
 
 // Assumes clients mutex unlocked
-int send_by_type(int sock_fd, message_type_t msg_type) {
+static int send_by_type(int sock_fd, message_type_t msg_type) {
 	packet_t msg[MAX_CONNECTIONS] = {0};
 	const size_t n = sizeof(packet_t);
 	int i = 0;
@@ -169,7 +177,7 @@ int send_by_type(int sock_fd, message_type_t msg_type) {
 }
 
 // Returns current ms
-uint64_t now_ms() {
+static uint64_t now_ms() {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 		
@@ -180,7 +188,7 @@ uint64_t now_ms() {
 
 
 // Performs IO with client
-void* client_io_thread(void* arg) {	
+static void* client_io_thread(void* arg) {	
 	client_thread_t* ct = (client_thread_t*)arg;	
 
 	struct pollfd pfd;
@@ -196,8 +204,8 @@ void* client_io_thread(void* arg) {
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
 	
-	// Temp buffer to read client data into. Later mutex memcpy into ct->net_msg
-	packet_t buf;
+	// Temp inbound_packet to read client data into. Later mutex memcpy into ct->net_msg
+	packet_t inbound_packet;
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN;
@@ -215,7 +223,7 @@ void* client_io_thread(void* arg) {
 		// Error during poll()
 		if (ret < 0)
                         if (errno != EINTR) {
-                                errlog("Client", "poll", io_fd, errno, "N/A", buf.username);
+                                errlog("Client", "poll", io_fd, errno, "N/A", inbound_packet.username);
                                 atomic_store(&ct->finished, true);
                                 break;
                         }
@@ -231,29 +239,31 @@ void* client_io_thread(void* arg) {
 			// Reads from client	
 			if (pfd.revents & POLLIN) {
 				int result = 0;
-				if ((result = full_read(io_fd, &buf, 1)) != 0) {
-					const char* err_status = (result == EOF) ? "User dc (EOF)" : "N/A";
-					
-					errlog("Client", "read", io_fd, result, err_status, buf.username);
+				if ((result = full_read(io_fd, &inbound_packet, 1)) != 0) {
+					char dc_msg[MAX_MSG_LEN];
+					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.username);
+					msglog(dc_msg);	
 					
 					atomic_store(&ct->finished, true);
 					break;
 				}
 				
 				pthread_mutex_lock(&clients_mutex);
-				memcpy(&ct->net_msg, &buf, sizeof(packet_t));
+				memcpy(&ct->net_msg, &inbound_packet, sizeof(packet_t));
 				pthread_mutex_unlock(&clients_mutex);
 				
 
-				switch ((message_type_t)buf.type) {
+				switch ((message_type_t)inbound_packet.type) {
 					case LOGIN:
-						errlog("Client", "--JOIN--", -1, -1, "User connected", buf.username);
+						char connect_msg[MAX_MSG_LEN];
+                                        	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", inbound_packet.username);
+                                        	msglog(connect_msg);
 						break;
 					case UPDATE_MESSAGE:
 						break;
 					// LOGOUT and invalid types are logged but disregarded	
 					default:
-						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", buf.username);
+						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", inbound_packet.username);
 						break;
 				}	
 			}
@@ -263,28 +273,36 @@ void* client_io_thread(void* arg) {
 		now = now_ms();
 		uint64_t delay;
 		if ((delay = (now - last_send_time)) >= NETWORK_TRANSFER_PERIOD) {
-			// Devlogs for late packets
+			// Update server metadata (late packets / latency)
 			float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
+			float tl = atomic_load(&total_latency);
+			atomic_compare_exchange_strong(&total_latency, &tl, tl + latency_ratio);
+			atomic_fetch_add(&late_packets, 1);
+
+			// Devlogs for packets that reached drop threshold
 			if (delay >= PACKET_DROP_THRESHOLD && settings.devlogs_enabled) {
 				// Determine status tag based on policy
 				const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
-				char msg[128];
-				snprintf(msg, 128, "%s: %.3fx Latency %s", buf.username, latency_ratio, status);
+				char msg[MAX_MSG_LEN];
+				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", inbound_packet.username, latency_ratio, status);
 				msglog(msg);
 			}
 			
 			// Drop packets if specified
 			if (delay >= PACKET_DROP_THRESHOLD && settings.drop_late_packets) {
+				atomic_fetch_add(&packets_dropped, 1);			
 				last_send_time = now_ms();
 				continue;
 			}
 			
-			// Send to client	
+			// Send packet to client	
 			last_send_time = now;
-			int result = 0;
+			int result;
                         if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
-        	                errlog("Client", "write", io_fd, result, "User dc", buf.username);
-                                atomic_store(&ct->finished, true);
+                        	char dc_msg[MAX_MSG_LEN];
+                                snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.username);
+                                msglog(dc_msg); 
+				atomic_store(&ct->finished, true);
                                 break;
                         }
 		}
@@ -297,13 +315,13 @@ void* client_io_thread(void* arg) {
 }
 
 // Allows graceful shutdown for SIGINT / SIGTERM
-void shutdown_handler(int signum) {
+static void shutdown_handler(int signum) {
 	atomic_store(&shutdown_requested, true);
 	//close(settings.socket_fd); // Interrupts accept()
 }
 
 // Calls in the beginning of atomicio_init_server() to make a clean slate for config
-void atomicio_config_reset() {
+static void atomicio_config_reset() {
 	// Reset the core execution flags
 	atomic_store(&shutdown_requested, false);
 	atomic_store(&settings.running, false);
@@ -312,13 +330,17 @@ void atomicio_config_reset() {
 	// Reset runtime metrics
 	atomic_store(&settings.connected_users, 0);
 	atomic_store(&settings.socket_fd, -1);
-
+	atomic_store(&server_start_timestamp, -1);
+	atomic_store(&packets_dropped, 0);
+	atomic_store(&late_packets, 0);
+	atomic_store(&total_latency, 0.0f);
+	
 	// Clear linked list head and semaphore
 	atomic_store(&clients, NULL);	
 	client_cleanup_sem = NULL;	
 }
 
-void atomicio_sighandlers_reset() {
+static void atomicio_sighandlers_reset() {
 	struct sigaction sa_def;
 	sa_def.sa_handler = SIG_DFL;
 	sigemptyset(&sa_def.sa_mask);
@@ -384,7 +406,9 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	settings.server.sin_family = AF_INET;
         settings.server.sin_port = htons(init_settings->port);
         settings.server.sin_addr.s_addr = INADDR_ANY;
-	// snprintf(settings.log_path, 128, "%s", init_settings->log_path);
+	
+	// MAX_PATH_LEN defined in log.h
+	snprintf(settings.log_path, MAX_PATH_LEN, "%s", init_settings->log_path);
 	
 	// IPv4 TCP default protocol
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -429,7 +453,7 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
         sem_unlink("/client_cleanup_sem");
 
         // Error opening error log; treated as catastrophic
-        if (init_log("Server") != 0)
+        if (init_log(settings.log_path) != 0)
                 goto err_close_log;
 
 	
@@ -507,8 +531,9 @@ int atomicio_run() {
         }
 
 
-	// Server loop
-        while (!atomic_load(&shutdown_requested)) {
+	// Server accept loop
+        atomic_store(&server_start_timestamp, now_ms());
+	while (!atomic_load(&shutdown_requested)) {
 
                 struct sockaddr_in new_client;
                 socklen_t adderlen = sizeof(new_client);
@@ -523,8 +548,13 @@ int atomicio_run() {
 			if (errno == EBADF)
 				break;
 	
-                        if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)
+                        else if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS)
                                 sleep(1);
+
+			else if (errno == ENOMEM) {
+				errlog("Main", "Accept", client_fd, errno, "No Mem", "New User");
+				atomic_store(&shutdown_requested, true);
+			}
 
                         // Depending on error, client either stays or is removed by kernel from accept queue
                         // Retry accept() always --- EMFILE or ENFILE (fd limit) and ENOBUFS or ENOMEM are network limits. Sleep & retry
@@ -624,7 +654,7 @@ int atomicio_run() {
 	// Sets init flag to false / resets sig handlers to allow subsequent server init/run
 	atomic_store(&settings.initialized, false);	
 	atomicio_sighandlers_reset();
-	
+		
 	// Return success (0) or failure (-1) based on flags
 	return (run_error) ? -1 : 0;		
 }
@@ -657,3 +687,27 @@ void atomicio_log(char* msg) {
 	// Passes along log message
 	msglog(msg);		
 }
+
+
+// Returns current user count
+int atomicio_get_active_user_count() {
+	return atomic_load(&settings.connected_users);
+}
+
+// Returns current server uptime
+uint64_t atomicio_getuptime_ms() {
+	// Server not running. Uptime is N/A
+	if (!atomic_load(&settings.running))
+		return -1;
+
+	return now_ms() - atomic_load(&server_start_timestamp);
+}
+
+float atomicio_get_avg_latency_multiplier() {
+	return (float)atomic_load(&total_latency) / atomic_load(&late_packets);	
+}
+
+// Returns total packets dropped
+uint64_t atomicio_get_dropped_packets_count() {
+	return atomic_load(&packets_dropped);
+}	

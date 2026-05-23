@@ -13,12 +13,8 @@
 #include <time.h>
 #include <stdbool.h>
 
-#define LOG_NAME_LEN 32
-#define MAX_PATH_LEN 96
-#define MAX_MSG_LEN 128
 
 // Instance specific log file path / name
-static char log_name[LOG_NAME_LEN] = {0};
 static char log_path[MAX_PATH_LEN] = {0};
 // Log file
 static FILE* log_f = NULL;
@@ -83,7 +79,7 @@ void set_timestamp(char* time) {
 }
 
 
-int init_log(char* name) {
+int init_log(char* path) {
 	// Log already initialized
 	if (atomic_load(&log_open))
 		return -1;
@@ -100,7 +96,7 @@ int init_log(char* name) {
 	log_tail = log_head;
 
 	// Spawns logging thread / Uses global log_path to store name
-	snprintf(log_name, LOG_NAME_LEN, "%s", name);
+	snprintf(log_path, MAX_PATH_LEN, "%s", path);
 	atomic_store(&log_open, true);
 	if (pthread_create(&log_thread, NULL, perform_logging, NULL) != 0) {
 		// Error spawning log thread
@@ -223,21 +219,23 @@ int msglog(char* msg) {
 static void* perform_logging(void* arg) {
 	
 	/* 
-	  Creates instance specific log w/ log_name
+	  Creates instance specific log w/ pre specified log_path from init method
 	 * Waits on semaphore; Writes log entry to log upon sem_post
 	*/
 	
 	char time_s[TIMESTAMP_LEN] = {0};
         set_timestamp(time_s);
-        snprintf(log_path, MAX_PATH_LEN, "../logs/%s_log_%s.txt", log_name, time_s);
 
-        log_f = fopen(log_path, "w");
+	char timestamped_path[MAX_PATH_LEN + TIMESTAMP_LEN + 5]; // 5 for '_' and ".txt"
+        snprintf(timestamped_path, MAX_PATH_LEN + TIMESTAMP_LEN + 5, "%s_%s.txt", log_path, time_s);
+
+        log_f = fopen(timestamped_path, "w");
         if (log_f == NULL) {
                 fprintf(stderr, "Error creating log file. Ironic\n");
                 goto term_thread;
         }
 
-        fprintf(log_f, "==========%s START==========\n\n", log_name);	
+        fprintf(log_f, "==========Log START==========\n\n");	
 	
 
 	// Begin; handle logging

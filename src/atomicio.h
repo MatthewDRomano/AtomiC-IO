@@ -28,7 +28,7 @@ int atomicio_init_server(const atomicio_config_t* init_settings);
 
 /**
  * Executes the main blocking client accept loop.
- * Call this after a successful initialization to boot the server application.
+ g Call this after a successful initialization to boot the server application.
  */ 
 int atomicio_run(void);
 

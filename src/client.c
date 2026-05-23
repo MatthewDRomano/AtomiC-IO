@@ -177,10 +177,7 @@ void* recv_thread(void *arg) {
 		packet_t buf[MAX_CONNECTIONS];
 
 		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
-			const char* err_status = (result == EOF) ? "EOF" : "N/A";
-			
-			errlog("Recv", "read", settings.socket_fd, result, err_status, client_info.username);
-
+			msglog("-==DISCONNECTED==-");
 			atomic_store(&settings.connected, false);	
 			break;
 		}
@@ -192,7 +189,7 @@ void* recv_thread(void *arg) {
 		message_type_t type = (message_type_t)buf[0].type;	
 		switch (type) {
 			case LOGOUT:
-				errlog("Recv", "msg parse", settings.socket_fd, -1, "Disconnect msg recv", client_info.username);
+				msglog("-==DISCONNECTED (SERVER REQUEST)==-");
 				atomic_store(&settings.connected, false);
 				break;
 			case UPDATE_MESSAGE:
@@ -216,8 +213,8 @@ void* send_thread(void *arg) {
 		
 		int result = 0;
 		if ((result = send_by_type(settings.socket_fd, UPDATE_MESSAGE)) != 0) {
+			msglog("-==DISCONNECTED==-");
 			atomic_store(&settings.connected, false);
-			errlog("Send", "write", settings.socket_fd, result, "Disconnected", client_info.username);
 			break;
 		}
 		
@@ -274,9 +271,11 @@ int main(int argc, char* argv[]) {
 
 	// Login message
         send_by_type(settings.socket_fd, LOGIN);
-
-
-	if (init_log(client_info.username) == -1)
+	msglog("-==CONNECTED==-");
+	
+	char log_path[MAX_PATH_LEN];
+	snprintf(log_path, MAX_PATH_LEN, "../logs/%s", client_info.username);
+	if (init_log(log_path) == -1)
                 goto err_close_log;
 
 

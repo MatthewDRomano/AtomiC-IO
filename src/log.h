@@ -2,10 +2,11 @@
 #define LOG_H
 
 #define TIMESTAMP_LEN 32
-
+#define MAX_PATH_LEN 96
+#define MAX_MSG_LEN 128
 
 // Creates new log specific to server instance
-int init_log(char* log_name);
+int init_log(char* path);
 
 // Closes file descriptor to log upon shutdown
 int end_log();
