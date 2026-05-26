@@ -74,7 +74,7 @@ int parse_args(int argc, char* argv[]) {
 			}
 			
 			// Upper bound username size declared in at_net.h	
-			snprintf(client_info.username, CLIENT_USERNAME_SIZE, "%s", argv[i]);
+			snprintf(client_info.client_uuid, CLIENT_USERNAME_SIZE, "%s", argv[i]);
 			username_set = true;
 		}
 
@@ -160,33 +160,37 @@ int parse_args(int argc, char* argv[]) {
 
 // Assumes clients mutex unlocked
 int send_by_type(int sock_fd, message_type_t msg_type) {
-	packet_t msg;
+	packet_t packet_out;
 
 	pthread_mutex_lock(&client_mutex);
-	memcpy(&msg, &client_info, sizeof(packet_t));
+	memcpy(&packet_out, &client_info, sizeof(packet_t));
 	pthread_mutex_unlock(&client_mutex);
 
-	msg.type = (uint8_t)msg_type;
-	return full_write(sock_fd, &msg, 1);
+	packet_out.type = htons((uint16_t)msg_type);
+	packet_out.active_users = htons(1);
+	return full_write(sock_fd, &packet_out, 1);
 }
 
 
 void* recv_thread(void *arg) {
-	while (atomic_load(&settings.connected)) {
-		int result = 0;
-		packet_t buf[MAX_CONNECTIONS];
+	int result = 0;
+        packet_t buf[MAX_CONNECTIONS];	
 
-		if ((result = full_read(settings.socket_fd, buf, MAX_CONNECTIONS)) != 0) {
+	while (atomic_load(&settings.connected)) {
+
+		if ((result = full_read(settings.socket_fd, buf)) != 0) {
 			msglog("-==DISCONNECTED==-");
 			atomic_store(&settings.connected, false);	
 			break;
 		}
+	
+		uint16_t active_users = ntohs(buf[0].active_users); // Alternatively: buf->active_users
 		
 		pthread_mutex_lock(&users_mutex);
-		memcpy(users, buf, sizeof(packet_t) * MAX_CONNECTIONS);
+		memcpy(users, buf, sizeof(packet_t) * active_users);
 		pthread_mutex_unlock(&users_mutex);	
 		
-		message_type_t type = (message_type_t)buf[0].type;	
+		message_type_t type = (message_type_t)ntohs(buf[0].type);	
 		switch (type) {
 			case LOGOUT:
 				msglog("-==DISCONNECTED (SERVER REQUEST)==-");
@@ -196,7 +200,7 @@ void* recv_thread(void *arg) {
 				break;
 			// Types LOGIN and invalid types cannot be sent
 			default:
-				errlog("Recv", "msg parse", settings.socket_fd, -1, "Inv msg type", client_info.username);
+				errlog("Recv", "msg parse", settings.socket_fd, -1, "Inv msg type", client_info.client_uuid);
 				break;
 		}
 	}	
@@ -270,11 +274,12 @@ int main(int argc, char* argv[]) {
 	atomic_store(&settings.connected, true);
 
 	// Login message
+	client_info.payload_len = htons(0);
         send_by_type(settings.socket_fd, LOGIN);
 	msglog("-==CONNECTED==-");
 	
 	char log_path[MAX_PATH_LEN];
-	snprintf(log_path, MAX_PATH_LEN, "../logs/%s", client_info.username);
+	snprintf(log_path, MAX_PATH_LEN, "../logs/%s", client_info.client_uuid);
 	if (init_log(log_path) == -1)
                 goto err_close_log;
 

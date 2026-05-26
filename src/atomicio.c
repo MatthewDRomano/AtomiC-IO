@@ -24,13 +24,13 @@
 
 #define MIN_PORT 1024
 #define MAX_PORT 49151
-#define CLIENT_STACK (1024 * 1024)  // 1 MB
+#define CLIENT_STACK (1024 * 256)  // 256 KB
 
 
 typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
-	packet_t net_msg;
+	packet_t data_packet;
 	atomic_bool finished;
 	
 	_Atomic(struct client_thread*) next; // Atomic ptr
@@ -136,7 +136,7 @@ static void* reaper_thread(void* arg) {
 				pthread_mutex_unlock(&clients_mutex);
 
 				/*char cleanup_msg[MAX_MSG_LEN];
-                                snprintf(cleanup_msg, MAX_MSG_LEN, "Client Successfully Reaped: %s", ct->net_msg.username);
+                                snprintf(cleanup_msg, MAX_MSG_LEN, "Client Successfully Reaped: %s", ct->data_packet.client_uuid);
                                 msglog(cleanup_msg);*/
 	
 				// Closes client connection and frees associated client_thread_t data
@@ -160,20 +160,33 @@ static void* reaper_thread(void* arg) {
 
 // Assumes clients mutex unlocked
 static int send_by_type(int sock_fd, message_type_t msg_type) {
-	packet_t msg[MAX_CONNECTIONS] = {0};
+	// C11 standard keyword to allocate this array once PER THREAD
+	// This array resides in TLS segment of virtual memory 
+	// And is in the same allocated block as stack when calling pthread_create() so consider this with pthread_attr
+	static _Thread_local packet_t all_client_packets[MAX_CONNECTIONS];
 	const size_t n = sizeof(packet_t);
 	int i = 0;
 
 	pthread_mutex_lock(&clients_mutex);
+	int active_users = atomic_load(&settings.connected_users);
 	client_thread_t* c = (client_thread_t*)atomic_load(&clients);
-	while (c != NULL && i < MAX_CONNECTIONS) {
-		memcpy(msg + (i++), &c->net_msg, n);
+
+	uint16_t net_type = htons((uint16_t)msg_type);
+	uint16_t net_act_usrs = htons((uint16_t)active_users);
+	while (c != NULL && i < active_users && i < MAX_CONNECTIONS) {
+		memcpy(all_client_packets + i, &c->data_packet, n);
+
+		// Maintains protocol usage consistent across all packets
+		all_client_packets[i].type = net_type;
+        	all_client_packets[i].active_users = net_act_usrs;
+
+		i++;
 		c = (client_thread_t*)atomic_load(&c->next);
 	}
 	pthread_mutex_unlock(&clients_mutex);
-	
-	msg[0].type = (uint8_t)msg_type;
-	return full_write(sock_fd, msg, MAX_CONNECTIONS);
+
+	// Sends all 'i' clients' data processed above	
+	return full_write(sock_fd, all_client_packets, i);
 }
 
 // Returns current ms
@@ -204,8 +217,8 @@ static void* client_io_thread(void* arg) {
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
 	
-	// Temp inbound_packet to read client data into. Later mutex memcpy into ct->net_msg
-	packet_t inbound_packet;
+	// Temp inbound_packet to read client data into. Later mutex memcpy into ct->data_packet
+	packet_t inbound_packet = {0};
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN;
@@ -223,7 +236,7 @@ static void* client_io_thread(void* arg) {
 		// Error during poll()
 		if (ret < 0)
                         if (errno != EINTR) {
-                                errlog("Client", "poll", io_fd, errno, "N/A", inbound_packet.username);
+                                errlog("Client", "poll", io_fd, errno, "N/A", inbound_packet.client_uuid);
                                 atomic_store(&ct->finished, true);
                                 break;
                         }
@@ -239,9 +252,9 @@ static void* client_io_thread(void* arg) {
 			// Reads from client	
 			if (pfd.revents & POLLIN) {
 				int result = 0;
-				if ((result = full_read(io_fd, &inbound_packet, 1)) != 0) {
+				if ((result = full_read(io_fd, &inbound_packet)) != 0) {
 					char dc_msg[MAX_MSG_LEN];
-					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.username);
+					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
 					msglog(dc_msg);	
 					
 					atomic_store(&ct->finished, true);
@@ -249,21 +262,21 @@ static void* client_io_thread(void* arg) {
 				}
 				
 				pthread_mutex_lock(&clients_mutex);
-				memcpy(&ct->net_msg, &inbound_packet, sizeof(packet_t));
+				memcpy(&ct->data_packet, &inbound_packet, sizeof(packet_t));
 				pthread_mutex_unlock(&clients_mutex);
 				
 
-				switch ((message_type_t)inbound_packet.type) {
+				switch ((message_type_t)ntohs(inbound_packet.type)) {
 					case LOGIN:
 						char connect_msg[MAX_MSG_LEN];
-                                        	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", inbound_packet.username);
+                                        	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", inbound_packet.client_uuid);
                                         	msglog(connect_msg);
 						break;
 					case UPDATE_MESSAGE:
 						break;
 					// LOGOUT and invalid types are logged but disregarded	
 					default:
-						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", inbound_packet.username);
+						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", inbound_packet.client_uuid);
 						break;
 				}	
 			}
@@ -284,7 +297,7 @@ static void* client_io_thread(void* arg) {
 				// Determine status tag based on policy
 				const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
 				char msg[MAX_MSG_LEN];
-				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", inbound_packet.username, latency_ratio, status);
+				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", inbound_packet.client_uuid, latency_ratio, status);
 				msglog(msg);
 			}
 			
@@ -300,7 +313,7 @@ static void* client_io_thread(void* arg) {
 			int result;
                         if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
                         	char dc_msg[MAX_MSG_LEN];
-                                snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.username);
+                                snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
                                 msglog(dc_msg); 
 				atomic_store(&ct->finished, true);
                                 break;
@@ -585,7 +598,8 @@ int atomicio_run() {
                 atomic_store(&ct->finished, false);
 			
                 // Creates thread & starts IO
-                if (pthread_create(&ct->thread, &client_attr, client_io_thread, ct) == 0) {
+                int rc = pthread_create(&ct->thread, &client_attr, client_io_thread, ct);
+		if (rc == 0) {
                         // PUBLISHES TO CLIENTS ONLY ON SUCCESS
                         client_thread_t* old_head;
                         do {
@@ -604,7 +618,7 @@ int atomicio_run() {
 
                 // Failed to create thread (before adding to global list)
                 else {
-                        errlog("Main", "pthread_create", ct->client_fd, errno, "N/A", "N/A");
+                        errlog("Main", "pthread_create", ct->client_fd, rc, "N/A", "N/A"); // Errno not set
 
                         // Manual cleanup since we cannot reap a nonexistent thread
                         close(client_fd);
