@@ -503,12 +503,12 @@ int atomicio_run() {
 	// ========================================================
 	
 	if (atomic_load(&settings.running)) {
-		fprintf(stderr, "Server already running\n");
+		fprintf(stderr, "Server already running!!!\n");
 		return -1;
 	}
 	
 	if (!atomic_load(&settings.initialized)) {
-		fprintf(stderr, "Server not initialized\n");
+		fprintf(stderr, "Failed to run. Server not initialized\n");
 		return -1;
 	}
 	
@@ -691,10 +691,15 @@ int atomicio_shutdown() {
 	return -1; // Already closed in a parallel call
 }
 
+// Returns true if server is running, otherwise false
+bool atomicio_is_running() {
+	return atomic_load(&settings.running);
+}
 
-void atomicio_log(char* msg) {
+// Logs a message
+void atomicio_log(const char* msg) {
 	if (!atomic_load(&settings.initialized)) {
-		fprintf(stderr, "Log is not open. Must initialize AtomiC-IO server\n");
+		fprintf(stderr, "Logging failed (Log not open). Must initialize AtomiC-IO server\n");
 		return;
 	}
 

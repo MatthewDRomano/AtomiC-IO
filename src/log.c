@@ -180,7 +180,7 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
         return 0;
 }
 
-int msglog(char* msg) {
+int msglog(const char* msg) {
         if (atomic_load(&log_open) == false)
                 return -1;
 

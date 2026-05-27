@@ -2,6 +2,7 @@
 #define ATOMICIO_CL_H
 
 #include <stdint.h>
+#include <stdbool.n>
 
 // 1. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
 // 	|-> Stores client data internally and encapsulates internal structure
@@ -31,6 +32,7 @@ int atomicio_cl_init(atomicio_cl_t* client, const atomicio_cl_config* cl_conf);
 
 /**
  * Establishes a TCP connection with server and begins receiving packets from the broadcast server.
+ * A receive thread is also spawned to update local client data sent periodically from broadcast server
  * Call this method after a successful call to atomicio_cl_init
  */
 int atomicio_cl_connect(atomicio_cl_t* client);
@@ -43,7 +45,7 @@ int atomicio_cl_connect(atomicio_cl_t* client);
 int atomicio_cl_disconnect(atomicio_cl_t* client);
 
 // ========================================================
-// 3. RUNTIME FUNCTIONS 
+// 3. RUNTIME DATA FUNCTIONS 
 // ========================================================
 
 /**
@@ -55,14 +57,36 @@ int atomicio_cl_disconnect(atomicio_cl_t* client);
  */ 
 int atomicio_cl_send_data(atomicio_cl_t* client, const void* data_out, uint16_t data_size);
 
+// ========================================================
+// 4. METADATA & DIAGNOSTICS
+// ========================================================
+
+/**
+ * Checks if a given client is currently connected to an AtomiC-IO server.
+ * Returns 1 if connected, 0 if disconnected or uninitialized
+ */
+bool atomicio_cl_is_connected(atomicio_cl_t* client);
+
 
 /**
  * Returns how long a given client has been connected to an AtomiC-IO server
  */ 
 uint64_t atomicio_cl_time_connected(atomicio_cl_t* client);
 
+
+/**
+ * Returns the total number of bytes successfully transmitted to the server
+ */ 
+uint64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client);
+
+
+/**
+ * Returns the total number of bytes received from the server
+ */
+uint64_t atomicio_ct_get_bytes_received(atomicio_cl_t* client);
+
 // ========================================================
-// 4. USER LOGGING
+// 5. USER LOGGING
 // ========================================================
 
 /**
