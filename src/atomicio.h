@@ -28,7 +28,7 @@ int atomicio_init_server(const atomicio_config_t* init_settings);
 
 /**
  * Executes the main blocking client accept loop.
- g Call this after a successful initialization to boot the server application.
+ * Call this after a successful initialization to boot the server application.
  */ 
 int atomicio_run(void);
 
@@ -72,6 +72,6 @@ uint64_t atomicio_get_dropped_packets_count(void);
 /**
  * Thread-safe logging option allowing custom message control for the user.
  */ 
-void atomicio_log(char* msg);
+void atomicio_log(const char* msg);
 
 #endif
