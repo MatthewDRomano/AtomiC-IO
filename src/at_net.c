@@ -47,7 +47,7 @@ int full_read(int socket_fd, packet_t* packet_buffer) {
 			uint16_t active_users = ntohs(current_packet->active_users);
 			
 			// Checks for invalid user count		
-			if (active_users < 0 || active_users > MAX_CONNECTIONS)	
+			if (active_users > MAX_CONNECTIONS)	
 				return ERR_USERS_OOB;
 			
 			packet_count = active_users;

@@ -252,6 +252,7 @@ static void* client_io_thread(void* arg) {
 			// Reads from client	
 			if (pfd.revents & POLLIN) {
 				int result = 0;
+				// Full read ensures number of packets read is between 1 and MAX_CONNECTIONS. (Guaranteed to be 1 here from client)
 				if ((result = full_read(io_fd, &inbound_packet)) != 0) {
 					char dc_msg[MAX_MSG_LEN];
 					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
@@ -404,12 +405,12 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	sigaction(SIGINT, &shutdown_sa, NULL);
 	sigaction(SIGTERM, &shutdown_sa, NULL);
 
-	struct sigaction ign = {0};
-        ign.sa_handler = SIG_IGN;
+	struct sigaction ign_sa = {0};
+        ign_sa.sa_handler = SIG_IGN;
         // Ensures Server stays open if terminal session closes
-	sigaction(SIGHUP, &ign, NULL);
+	sigaction(SIGHUP, &ign_sa, NULL);
         // Ensures failed write() sets errno EPIPE and returns -1 instead of crashing with SIGPIPE
-        sigaction(SIGPIPE, &ign, NULL);
+        sigaction(SIGPIPE, &ign_sa, NULL);
 
 
 	// Sets server settings - fields zeroed out by default
