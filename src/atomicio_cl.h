@@ -2,7 +2,7 @@
 #define ATOMICIO_CL_H
 
 #include <stdint.h>
-#include <stdbool.n>
+#include <stdbool.h>
 #include "at_net.h"
 
 // 1. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
@@ -28,7 +28,7 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path);
  * The aforementioned receive thread is spawned to update local client data.
  * Call this method after successfully creating a client object.
  */
-int atomicio_cl_connect(atomicio_cl_t* client_ctx, , uint16_t port, const char* ipv4_domain);
+int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ipv4_domain);
 
 
 /**
@@ -40,7 +40,8 @@ void atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
 
 /**
  * Cleans up internally allocated client data and frees associated client_ctx struct.
- * The passed in atomicio_cl_t* is no longer valid
+ * Calling destroy while connected to a server will initiate a clean disconnect.
+ * The passed in atomicio_cl_t* is no longer valid after this call
  */
 int atomicio_cl_destroy(atomicio_cl_t* client_ctx);
 
@@ -73,6 +74,13 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type);
  * Returns 1 if connected, 0 if disconnected or uninitialized
  */
 bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx);
+
+
+/**
+ * Returns the active user count of the AtomiC-IO server the client is connected to.
+ * Returns 0 as default if the client is either not connected, or has yet to receive a packet
+ */ 
+int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx);
 
 
 /**
