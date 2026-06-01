@@ -428,44 +428,6 @@ static void* client_accept_thread(void* arg) {
 	}
 		
 	
-	// ========================================================
-        // Clean up server resources and reset global fields
-        // ========================================================
-
-
-        // Server is closing / finishes all threads for reaper to join
-        pthread_mutex_lock(&clients_mutex);
-        client_thread_t* c = (client_thread_t*)atomic_load(&clients);
-        while (c != NULL) {
-                //send_by_type(c->client_fd, LOGOUT);
-                atomic_store(&c->finished, true);
-                c = (client_thread_t*)atomic_load(&c->next);
-        }
-        pthread_mutex_unlock(&clients_mutex);
-
-        // Shutdown requested. Updates running value to false for all threads
-        atomic_store(&settings.running, false);
-
-
-
-        // Kills reaper thread and joins all client threads
-        sem_post(client_cleanup_sem);
-        pthread_join(reaper, NULL);
-        sem_close(client_cleanup_sem);
-
-        // Destroys client thread attribute
-        pthread_attr_destroy(&client_attr);
-
-
-        // Core library systems always close
-        end_log();
-        int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-        if (fd_to_close >= 0)
-                close(fd_to_close);
-
-        // Sets init flag to false to allow subsequent server init/run
-        atomic_store(&settings.initialized, false);
-
 	return NULL;	
 }
 
@@ -695,19 +657,54 @@ int atomicio_shutdown() {
 	if (!atomic_load(&settings.running))
 		return -1;
 
-	// Set exit flag for main accept thread -> Finalizes shutdown
+	// Set exit flag for main accept thread -> Begins shutdown
 	atomic_store(&shutdown_requested, true);		
 
 	// Close listening client to break blocking accept() loop
 	int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-	if (fd_to_close >= 0) {
+	if (fd_to_close >= 0)
 		close(fd_to_close);
-		return 0; // Successful closure
-	}
 
+	// Waits for accepter thread to finish 
 	pthread_join(accepter, NULL);
 	
-	return -1; // Already closed in a parallel call
+
+	// ========================================================
+        // Clean up server resources and reset global fields
+        // ========================================================
+
+
+        // Server is closing / finishes all threads for reaper to join
+        pthread_mutex_lock(&clients_mutex);
+        client_thread_t* c = (client_thread_t*)atomic_load(&clients);
+        while (c != NULL) {
+                //send_by_type(c->client_fd, LOGOUT);
+                atomic_store(&c->finished, true);
+                c = (client_thread_t*)atomic_load(&c->next);
+        }
+        pthread_mutex_unlock(&clients_mutex);
+
+        // Shutdown requested. Updates running value to false for all threads
+        atomic_store(&settings.running, false);
+
+
+
+        // Kills reaper thread and joins all client threads
+        sem_post(client_cleanup_sem);
+        pthread_join(reaper, NULL);
+        sem_close(client_cleanup_sem);
+
+        // Destroys client thread attribute
+        pthread_attr_destroy(&client_attr);
+
+
+        // Close log
+        end_log();
+
+        // Sets init flag to false to allow subsequent server init/run
+        atomic_store(&settings.initialized, false);
+
+	return 0;
 }
 
 // Returns true if server is running, otherwise false
