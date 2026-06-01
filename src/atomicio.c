@@ -654,8 +654,33 @@ int atomicio_run() {
 
 
 int atomicio_shutdown() {
-	if (!atomic_load(&settings.running))
+
+	// Executes if the server is not running
+	if (!atomic_load(&settings.running)) {
+		// Clean up possible server init resources 
+		if (atomic_load(&settings.initialized)) {
+        		sem_close(client_cleanup_sem);
+
+			int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
+        		if (fd_to_close >= 0)
+                		close(fd_to_close);
+		
+			end_log();
+	
+			atomic_store(&settings.initialized, false);
+			return 0;
+		}
+	
+		// Otherwise return -1 if the server is not running nor initialized
+		// Nothing to shutdown!
 		return -1;
+	}
+
+
+	// ========================================================
+	// Proper shutdown sequence of a running server below
+	// ========================================================	
+
 
 	// Set exit flag for main accept thread -> Begins shutdown
 	atomic_store(&shutdown_requested, true);		

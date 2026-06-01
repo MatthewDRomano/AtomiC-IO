@@ -40,7 +40,7 @@ void atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
 
 /**
  * Cleans up internally allocated client data and frees associated client_ctx struct.
- * Calling destroy while connected to a server will initiate a clean disconnect.
+ * Calling destroy while connected to a server will also initiate a clean disconnect.
  * The passed in atomicio_cl_t* is no longer valid after this call
  */
 int atomicio_cl_destroy(atomicio_cl_t* client_ctx);
@@ -84,9 +84,15 @@ int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx);
 
 
 /**
- * Returns how long a given client has been connected to an AtomiC-IO server
+ * Returns how long a given client has been connected to an active AtomiC-IO server session in milliseconds.
  */ 
-uint64_t atomicio_cl_time_connected(atomicio_cl_t* client_ctx);
+uint64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx);
+
+
+/**
+ * Returns how long a given client has been alive (time since creation)
+ */ 
+uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx);
 
 
 /**

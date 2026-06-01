@@ -29,7 +29,6 @@ void* recv_thread(void* arg);
 
 
 typedef enum {
-	STATE_UNINITIALIZED = 0,
 	STATE_DISCONNECTED,
 	STATE_CONNECTED,
 	STATE_AWAITING_CLEANUP
@@ -45,7 +44,8 @@ typedef struct {
 typedef struct {
 	_Atomic(uint64_t) bytes_sent;
 	_Atomic(uint64_t) bytes_received;
-	_Atomic(uint64_t) uptime;
+	_Atomic(uint64_t) init_epoch;
+	_Atomic(uint64_t) connection_epoch;
 } telemetry_t;
 
 
@@ -65,6 +65,16 @@ struct atomicio_client_ctx {
 	_Atomic(client_state_t) state;
 };
 
+
+// Returns current ms
+static uint64_t now_ms() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+
+        // Sec / ns conversion
+        return (uint64_t)ts.tv_sec * 1000
+                + ts.tv_nsec / 1000000;
+}
 
 
 
@@ -91,9 +101,10 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 	snprintf(new_client_ctx->my_client.client_uuid, CLIENT_USERNAME_SIZE, "%s", uuid);
 	snprintf(new_client_ctx->log_path, MAX_PATH_LEN, "%s", log_path);
 	
-	// Zero-set client metadata
+	// Init client metadata
 	atomic_init(&new_client_ctx->active_user_count, 0);
 	new_client_ctx->metadata = (telemetry_t){0};
+	new_client_ctx->metadata.init_epoch = now_ms();
 
 	// Client is now fully initialized and address is returned
 	atomic_init(&new_client_ctx->state, STATE_DISCONNECTED);
@@ -112,8 +123,7 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ip
 		return -1;
 	
 	// Ensure object is not uninitialized or already connected
-	client_state_t current_state = atomic_load(&client_ctx->state);
-	if (current_state == STATE_UNINITIALIZED || current_state == STATE_CONNECTED) {
+	if (atomic_load(&client_ctx->state) == STATE_CONNECTED) {
 		fprintf(stderr, "Client is either uninitialized or already connected\n");
 		return -1;
 	}
@@ -163,6 +173,7 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ip
 
 	// Connection successful
         atomic_store(&client_ctx->state, STATE_CONNECTED);
+	atomic_store(&client_ctx->metadata.connection_epoch, now_ms());	
 
 	/*
 	if (init_log(client_ctx->log_path) == -1)
@@ -235,8 +246,7 @@ void atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 		return;
 	
 	// Ensures object is able to be disconnected (in state CONNECTED or AWAITING_CLEANUP)
-	client_state_t current_state = atomic_load(&client_ctx->state);
-	if (current_state == STATE_DISCONNECTED || current_state == STATE_UNINITIALIZED)
+	if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
 		return;
 
 	// Severs TCP and sets state to awaiting cleanup
@@ -266,7 +276,7 @@ void atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 
 int atomicio_cl_destroy(atomicio_cl_t* client_ctx) {
 	// Ensures object is valid
-	if (!client_ctx || atomic_load(&client_ctx->state) == STATE_UNINITIALIZED) 
+	if (!client_ctx) 
 		return 0;
 
 	// Ensures clean disconnect if the client is connected / awaiting cleanup
@@ -302,7 +312,7 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
 
 	packet_t packet_out;
 	
-	// Locks mutex for local client data
+	// Locks mutex for copying local client data to outbound packet
 	pthread_mutex_lock(&client_ctx->my_client_mutex);
         memcpy(&packet_out, &client_ctx->my_client, sizeof(packet_t));
         pthread_mutex_unlock(&client_ctx->my_client_mutex);
@@ -318,6 +328,8 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
 		return -1;
 	}
 
+	// Increment bytes sent metadata and return
+	atomic_fetch_add(&client_ctx->metadata.bytes_sent, ntohs(client_ctx->my_client.payload_len));
 	return 0;			
 }
 
@@ -327,12 +339,6 @@ int atomicio_cl_data_update(atomicio_cl_t* client_ctx, const void* data, uint16_
 	if (!client_ctx) {
 		fprintf(stderr, "Client must be created\n");
                 return -1;
-	}
-
-	// Ensures client is properly initialized as well before updating fields
-	if (atomic_load(&client_ctx->state) == STATE_UNINITIALIZED) {
-		fprintf(stderr, "Cannot update data of an uninitialized client\n");
-		return -1;
 	}
 
 	// Ensures data size aligns with AtomiC-IO protocols (Unsigned specifier)	
@@ -363,7 +369,18 @@ int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx) {
 	return (client_ctx) ? atomic_load(&client_ctx->active_user_count) : 0;
 }
 
+uint64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx) {
+	if (!client_ctx)
+		return 0;
 
+	// Returns 0 if the client has never connected to the server
+	uint64_t client_connect_epoch = atomic_load(&client_ctx->metadata.connection_epoch);	
+	return (client_connect_epoch == 0) ? 0 : now_ms() - client_connect_epoch: 
+}
+
+uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
+	return (client_ctx) ? now_ms() - client_ctx->metadata.init_epoch : 0;
+}
 
 
 
