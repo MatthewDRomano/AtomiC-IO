@@ -22,6 +22,17 @@
 
 
 #define MAX_PORT 65535
+#define ATOMICIO_CL_MAGIC_COOKIE 0x006174696F636C00 // " atiocl "
+
+// Checks client contexts passed at the tops of methods to ensure they are valid (created w/ atomicio_cl_create())
+#define VALIDATE_CLIENT(ctx) \
+    do { \
+        if (!(ctx) || (ctx)->token != ATOMICIO_CL_MAGIC_COOKIE) { \
+ 	    fprintf(stderr, "API ERROR: Invalid or corrupted client context pointer passed as arg.\n"); \
+  	    return -1; \
+	} \
+    } while (0)
+
 
 
 // Forward declaration
@@ -50,6 +61,8 @@ typedef struct {
 
 
 struct atomicio_client_ctx {
+	uint64_t token; 	// Used to ensure an atomicio_client_ctx (atomicio_cl_t*) is what's passed into methods
+
 	packet_t my_client;
  	packet_t all_clients_broadcast[MAX_CONNECTIONS];
 	pthread_mutex_t my_client_mutex;
@@ -86,6 +99,9 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 		return NULL;
 	}
 
+	// Set validity token to magic_cookie
+	new_client_ctx->token = ATOMICIO_CL_MAGIC_COOKIE;
+
 	// Zero-set network fields
         new_client_ctx->network.server = (struct sockaddr_in){0};
         new_client_ctx->network.socket_fd = -1;
@@ -118,11 +134,10 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ip
         // Ensures valid conditions to connect client to server
         // ========================================================
 
-	// Ensures object is valid
-        if (!client_ctx)
-		return -1;
+	// Ensures object is valid / returning -1 if not
+        VALIDATE_CLIENT(client_ctx);
 	
-	// Ensure object is not uninitialized or already connected
+	// Ensure object is not already connected
 	if (atomic_load(&client_ctx->state) == STATE_CONNECTED) {
 		fprintf(stderr, "Client is either uninitialized or already connected\n");
 		return -1;
@@ -240,14 +255,13 @@ static void internal_connection_teardown(atomicio_cl_t* client_ctx) {
 
 // Calls internal_connection_teardown() to sever TCP and frees receive thread memory
 // If a client is not connected, this method is still safe to call and does nothing
-void atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
-	// Ensures object is valid
-	if (!client_ctx)
-		return;
+int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);	
 	
 	// Ensures object is able to be disconnected (in state CONNECTED or AWAITING_CLEANUP)
 	if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
-		return;
+		return -1;
 
 	// Severs TCP and sets state to awaiting cleanup
 	internal_connection_teardown(client_ctx);
@@ -271,13 +285,13 @@ void atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 
 	// Close log upon dc
 	//end_log();
+	return 0;
 }
 
 
 int atomicio_cl_destroy(atomicio_cl_t* client_ctx) {
-	// Ensures object is valid
-	if (!client_ctx) 
-		return 0;
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
 
 	// Ensures clean disconnect if the client is connected / awaiting cleanup
 	client_state_t current_state = atomic_load(&client_ctx->state);
@@ -298,11 +312,8 @@ int atomicio_cl_destroy(atomicio_cl_t* client_ctx) {
 
 
 int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
-	// Must have a valid client 
-	if (!client_ctx) {
-		fprintf(stderr, "Client must be created\n");
-		return -1;
-	}
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
 
 	// Ensures proper connection to server	
 	if (atomic_load(&client_ctx->state) != STATE_CONNECTED) {
@@ -335,11 +346,8 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
 
 
 int atomicio_cl_data_update(atomicio_cl_t* client_ctx, const void* data, uint16_t data_size) {
-	// Must have valid client
-	if (!client_ctx) {
-		fprintf(stderr, "Client must be created\n");
-                return -1;
-	}
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
 
 	// Ensures data size aligns with AtomiC-IO protocols (Unsigned specifier)	
 	if (data_size > PAYLOAD_MAX) {
@@ -359,27 +367,33 @@ int atomicio_cl_data_update(atomicio_cl_t* client_ctx, const void* data, uint16_
 
 
 bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx) {
-	if (client_ctx)
-		return atomic_load(&client_ctx->state) == STATE_CONNECTED;
-	else
+	if (!client_ctx)
 		return false;
+
+	return atomic_load(&client_ctx->state) == STATE_CONNECTED;
 }
 
 int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx) {
-	return (client_ctx) ? atomic_load(&client_ctx->active_user_count) : 0;
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
+
+	return atomic_load(&client_ctx->active_user_count);
 }
 
 uint64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx) {
-	if (!client_ctx)
-		return 0;
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
 
 	// Returns 0 if the client has never connected to the server
 	uint64_t client_connect_epoch = atomic_load(&client_ctx->metadata.connection_epoch);	
-	return (client_connect_epoch == 0) ? 0 : now_ms() - client_connect_epoch: 
+	return (client_connect_epoch == 0) ? 0 : now_ms() - client_connect_epoch;
 }
 
 uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
-	return (client_ctx) ? now_ms() - client_ctx->metadata.init_epoch : 0;
+	// Ensures object is valid / returning -1 if not
+	VALIDATE_CLIENT(client_ctx);
+	
+	return now_ms() - client_ctx->metadata.init_epoch;
 }
 
 

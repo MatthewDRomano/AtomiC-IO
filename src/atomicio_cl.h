@@ -34,8 +34,9 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ip
 /**
  * Sets connection flags to false and begins a graceful disconnect from the server.
  * After disconnecting, the client log is closed and client resources are cleaned up 
+ * ONLY returns -1 upon invalid / corrupted client_ctx arg. In practice the return value can be ignored.
  */
-void atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
+int atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
 
 
 /**
@@ -71,7 +72,7 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type);
 
 /**
  * Checks if a given client is currently connected to an AtomiC-IO server.
- * Returns 1 if connected, 0 if disconnected or uninitialized
+ * Returns true if connected, false if disconnected or uninitialized
  */
 bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx);
 
@@ -79,31 +80,36 @@ bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx);
 /**
  * Returns the active user count of the AtomiC-IO server the client is connected to.
  * Returns 0 as default if the client is either not connected, or has yet to receive a packet
+ * Returns -1 if the client context is not valid
  */ 
 int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns how long a given client has been connected to an active AtomiC-IO server session in milliseconds.
- */ 
+ * Returns -1 if the client context is not valid 
+*/ 
 uint64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns how long a given client has been alive (time since creation)
- */ 
+ * Returns -1 if the client context is not valid 
+*/ 
 uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns the total number of bytes successfully transmitted to the server
- */ 
+ * Returns -1 if the client context is not valid 
+*/ 
 uint64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns the total number of bytes received from the server
- */
+ * Returns -1 if the client context is not valid 
+*/
 uint64_t atomicio_cl_get_bytes_received(atomicio_cl_t* client_ctx);
 
 // ========================================================

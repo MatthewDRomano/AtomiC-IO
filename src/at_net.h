@@ -6,7 +6,6 @@
 #define MAX_CONNECTIONS 128
 #define PACKET_HEADER_SIZE 38 // uuid, type, payload_len
 #define PAYLOAD_MAX (1024 - PACKET_HEADER_SIZE) // 986 1KB total
-#define DEFAULT_PORT 5555
 #define CLIENT_USERNAME_SIZE 32
 
 #define ERR_PAYLOAD_OOB -2
