@@ -130,6 +130,7 @@ static void* reaper_thread(void* arg) {
 
 
 		// pp tracks list element addresses (manages list), ct is atomically loaded client_thread_t
+		// This approach works under the assumption no other thread can add to / remove from the list asides from prepending the head
 		_Atomic(client_thread_t*)* pp = &clients;
 		client_thread_t* ct = (client_thread_t*)atomic_load(pp);
 
@@ -258,7 +259,7 @@ static void* client_io_thread(void* arg) {
 		if (ret > 0) {
 			// Socket err	
 			if (pfd.revents & (POLLHUP | POLLERR)) {
-				send_by_type(io_fd, LOGOUT);
+				//send_by_type(io_fd, LOGOUT); // socket broken
 				atomic_store(&ct->finished, true);
 				break;
                         }
@@ -304,7 +305,7 @@ static void* client_io_thread(void* arg) {
 			// Update server metadata (late packets / latency)
 			float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
 			float tl = atomic_load(&total_latency);
-			atomic_compare_exchange_strong(&total_latency, &tl, tl + latency_ratio);
+			atomic_store(&total_latency, tl + latency_ratio);
 			atomic_fetch_add(&late_packets, 1);
 
 			// Devlogs for packets that reached drop threshold
@@ -351,7 +352,7 @@ static void* client_accept_thread(void* arg) {
 
                 struct sockaddr_in new_client;
                 socklen_t adderlen = sizeof(new_client);
-                int client_fd;
+                int client_fd = -1;
 
                 // Checks for accept() error / BLOCKING
                 while (!atomic_load(&shutdown_requested) && ((client_fd = accept(atomic_load(&settings.socket_fd),
@@ -508,12 +509,12 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	// Copy fd to global settings 
 	atomic_store(&settings.socket_fd, listen_fd);
 
-	// Allows rebind to same port after server termination w/o delay
+	// SO_REUSEADDR Allows rebind to same port after server termination w/o a delay
         // regardless if clients in TIME_WAIT or not
         int opt = 1;
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        // Binds server to socket
+        // Binds server to socket w/ above socket config
         while (bind(listen_fd, (struct sockaddr*)(&settings.server), sizeof(settings.server)) == -1) {
                 if (errno == EINTR)
                         continue;
@@ -662,8 +663,10 @@ int atomicio_shutdown() {
         		sem_close(client_cleanup_sem);
 
 			int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-        		if (fd_to_close >= 0)
-                		close(fd_to_close);
+        		if (fd_to_close >= 0) {
+                		shutdown(fd_to_close, SHUT_RDWR); // needed to wake accept() block
+				close(fd_to_close);
+			}
 		
 			end_log();
 	
@@ -687,8 +690,11 @@ int atomicio_shutdown() {
 
 	// Close listening client to break blocking accept() loop
 	int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-	if (fd_to_close >= 0)
+	if (fd_to_close >= 0) {
+		shutdown(fd_to_close, SHUT_RDWR); // needed to wake accept() block
 		close(fd_to_close);
+	}
+
 
 	// Waits for accepter thread to finish 
 	pthread_join(accepter, NULL);
@@ -699,19 +705,19 @@ int atomicio_shutdown() {
         // ========================================================
 
 
-        // Server is closing / finishes all threads for reaper to join
+        // Server is closing / finishes all threads & shuts down connection for reaper to join
         pthread_mutex_lock(&clients_mutex);
         client_thread_t* c = (client_thread_t*)atomic_load(&clients);
         while (c != NULL) {
                 //send_by_type(c->client_fd, LOGOUT);
                 atomic_store(&c->finished, true);
-                c = (client_thread_t*)atomic_load(&c->next);
+                //shutdown(c->client_fd, SHUT_RDWR);
+		c = (client_thread_t*)atomic_load(&c->next);
         }
         pthread_mutex_unlock(&clients_mutex);
 
         // Shutdown requested. Updates running value to false for all threads
         atomic_store(&settings.running, false);
-
 
 
         // Kills reaper thread and joins all client threads
@@ -758,7 +764,7 @@ int atomicio_get_active_user_count() {
 uint64_t atomicio_getuptime_ms() {
 	// Server not running. Uptime is N/A
 	if (!atomic_load(&settings.running))
-		return -1;
+		return 0;
 
 	return now_ms() - atomic_load(&server_start_timestamp);
 }

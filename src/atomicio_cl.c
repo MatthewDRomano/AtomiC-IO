@@ -24,7 +24,7 @@
 #define MAX_PORT 65535
 #define ATOMICIO_CL_MAGIC_COOKIE 0x006174696F636C00 // " atiocl "
 
-// Checks client contexts passed at the tops of methods to ensure they are valid (created w/ atomicio_cl_create())
+// Checks client contexts passed into methods to ensure they are valid (created w/ atomicio_cl_create())
 #define VALIDATE_CLIENT(ctx) \
     do { \
         if (!(ctx) || (ctx)->token != ATOMICIO_CL_MAGIC_COOKIE) { \
@@ -79,6 +79,9 @@ struct atomicio_client_ctx {
 };
 
 
+
+
+
 // Returns current ms
 static uint64_t now_ms() {
         struct timespec ts;
@@ -120,7 +123,8 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 	// Init client metadata
 	atomic_init(&new_client_ctx->active_user_count, 0);
 	new_client_ctx->metadata = (telemetry_t){0};
-	new_client_ctx->metadata.init_epoch = now_ms();
+	atomic_init(&new_client_ctx->metadata.init_epoch, now_ms());
+	atomic_init(&new_client_ctx->metadata.connection_epoch, 0);
 
 	// Client is now fully initialized and address is returned
 	atomic_init(&new_client_ctx->state, STATE_DISCONNECTED);
@@ -393,7 +397,7 @@ uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
 	// Ensures object is valid / returning -1 if not
 	VALIDATE_CLIENT(client_ctx);
 	
-	return now_ms() - client_ctx->metadata.init_epoch;
+	return now_ms() - atomic_load(&client_ctx->metadata.init_epoch);
 }
 
 
