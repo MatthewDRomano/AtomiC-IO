@@ -40,6 +40,13 @@ static _Atomic(client_thread_t*) clients = NULL;
 static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 static sem_t* client_cleanup_sem;
 
+// Client thread attribute for limiting stack size
+static pthread_attr_t client_attr;
+
+// Reaper thread and main accept thread
+static pthread_t reaper;
+static pthread_t accepter;
+
 
 typedef struct {
 	atomic_int connected_users;
@@ -68,7 +75,8 @@ static _Atomic bool shutdown_requested = false;
 
 // Checks for finished clients to remove
 static bool has_dead_clients() {
-	// Grabs a snapshot of the current list (list cannot be changed during loop as this method halts reaper)
+	// Grabs a snapshot of the current list (
+	// Asides from adding a new head, the list cannot be changed during loop as this method halts reaper
 	client_thread_t* ct = atomic_load(&clients);
 	while (ct != NULL) {
 		if (atomic_load(&ct->finished)) 
@@ -101,15 +109,19 @@ static void cleanup_client(client_thread_t* ct) {
 // Handles cleaning up client_thread_t resources when set to finished
 static void* reaper_thread(void* arg) {
 	
-	while(atomic_load(&settings.running)) {
+	// Ensures a final sweep happens when the server is shutting down
+	int final_sweep_flag = 1;
+	while(atomic_load(&settings.running) || final_sweep_flag-- == 1) {
 	
-		// Ignores spurious wake ups	
-		while (!has_dead_clients()) {
+		// Ignores spurious wake ups while the server is running
+		// Thread waits until a client is marked as finished, or server is shutting down	
+		while (atomic_load(&settings.running) && !has_dead_clients()) {
 			sem_wait(client_cleanup_sem);
+		}
 
-			// Ensures reaper does not infinitely sleep upon shutdown with no clients
-			if (!atomic_load(&settings.running) && atomic_load(&settings.connected_users) == 0)
-				break;
+		// At this point a final sweep is already occurring
+		if (!atomic_load(&settings.running)) {
+			final_sweep_flag = 0; // Prevents outer loop from allowing another sweep
 		}
 		
 		while (sem_trywait(client_cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
@@ -128,16 +140,17 @@ static void* reaper_thread(void* arg) {
 				
 				// Mutex ensures a dead client is removed before other threads access clients list
 				pthread_mutex_lock(&clients_mutex);
-				if (!atomic_compare_exchange_weak(pp, &ct, next_node)) {
-					ct = (client_thread_t*)atomic_load(pp);
+				
+				// This block executes if ct no longer matches *pp. Update ct and try the loop iteration again
+				// exchange_strong ensures no spurious failures, and catches linked list updates due to untimely context switches
+				if (!atomic_compare_exchange_strong(pp, &ct, next_node)) {
 					pthread_mutex_unlock(&clients_mutex);
+					ct = (client_thread_t*)atomic_load(pp);
 					continue;
 				}
-				pthread_mutex_unlock(&clients_mutex);
 
-				/*char cleanup_msg[MAX_MSG_LEN];
-                                snprintf(cleanup_msg, MAX_MSG_LEN, "Client Successfully Reaped: %s", ct->data_packet.client_uuid);
-                                msglog(cleanup_msg);*/
+				// Exchange/client removal was a success. Clean up client resources
+				pthread_mutex_unlock(&clients_mutex);
 	
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
@@ -148,7 +161,8 @@ static void* reaper_thread(void* arg) {
 			else {
 				pp = &ct->next;
 			}
-			
+
+			// Update ct to next client			
 			ct = (client_thread_t*)atomic_load(pp);
 
 		}
@@ -328,11 +342,134 @@ static void* client_io_thread(void* arg) {
 	return NULL;
 }
 
-// Allows graceful shutdown for SIGINT / SIGTERM
-static void shutdown_handler(int signum) {
-	atomic_store(&shutdown_requested, true);
-	//close(settings.socket_fd); // Interrupts accept()
+
+static void* client_accept_thread(void* arg) {
+	
+	// Server accept loop
+        atomic_store(&server_start_timestamp, now_ms());
+        while (!atomic_load(&shutdown_requested)) {
+
+                struct sockaddr_in new_client;
+                socklen_t adderlen = sizeof(new_client);
+                int client_fd;
+
+                // Checks for accept() error / BLOCKING
+                while (!atomic_load(&shutdown_requested) && ((client_fd = accept(atomic_load(&settings.socket_fd),
+                        (struct sockaddr*)&new_client,
+                        &adderlen)) == -1)) {
+
+                        // Another thread closed listening fd (settings.socket_fd) break instantly
+                        if (errno == EBADF)
+                                break;
+
+                        else if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS)
+                                sleep(1);
+
+                        else if (errno == ENOMEM) {
+                                errlog("Main", "Accept", client_fd, errno, "No Mem", "New User");
+                                atomic_store(&shutdown_requested, true);
+                        }
+
+                        // Depending on error, client either stays or is removed by kernel from accept queue
+                        // Retry accept() always --- EMFILE or ENFILE (fd limit) and ENOBUFS or ENOMEM are network limits. Sleep & retry
+                }
+
+                // Exits server loop if terminated
+                if (atomic_load(&shutdown_requested) || client_fd == -1)
+                        break;
+
+                // Server is full
+                if (atomic_load(&settings.connected_users) >= settings.max_users) {
+                        //send_by_type(client_fd, LOGOUT); // THIS IS EXPENSIVE / TIME CONSUMING FOR SOMEONE NOT EVEN CONNECTED (abusable aswell)
+                        shutdown(client_fd, SHUT_RDWR);
+                        close(client_fd);
+                        continue;
+                }
+
+                // Create new client once accepted
+                client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
+                if (!ct) {
+                        errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
+                        close(client_fd);
+                        break;
+                }
+
+                // Sets file descriptor
+                ct->client_fd = client_fd;
+                atomic_store(&ct->finished, false);
+
+                // Creates thread & starts IO
+                int rc = pthread_create(&ct->thread, &client_attr, client_io_thread, ct);
+		if (rc == 0) {
+                        // PUBLISHES TO CLIENTS ONLY ON SUCCESS
+                        client_thread_t* old_head;
+                        do {
+                                old_head = (client_thread_t*)atomic_load(&clients);
+                                atomic_store(&ct->next, old_head);
+                                // Indivisible swap if the head hasn't changed / acts as MIPS load-linked & store-conditional
+                        } while (!atomic_compare_exchange_weak(&clients, &old_head, ct));
+
+                        atomic_fetch_add(&settings.connected_users, 1);
+
+                        // Prevents a client from potentially avoiding reaper
+                        // Exact Situation: Client finishes and calls sem_post() before the reaper can see client in the list (because pthread_Create() before adding to list)
+                        if (atomic_load(&ct->finished))
+                                sem_post(client_cleanup_sem);
+                }
+
+                // Failed to create thread (before adding to global list)
+                else {
+                        errlog("Main", "pthread_create", ct->client_fd, rc, "N/A", "N/A"); // Errno not set
+
+                        // Manual cleanup since we cannot reap a nonexistent thread
+                        close(client_fd);
+                        free(ct);
+                }
+	}
+		
+	
+	// ========================================================
+        // Clean up server resources and reset global fields
+        // ========================================================
+
+
+        // Server is closing / finishes all threads for reaper to join
+        pthread_mutex_lock(&clients_mutex);
+        client_thread_t* c = (client_thread_t*)atomic_load(&clients);
+        while (c != NULL) {
+                //send_by_type(c->client_fd, LOGOUT);
+                atomic_store(&c->finished, true);
+                c = (client_thread_t*)atomic_load(&c->next);
+        }
+        pthread_mutex_unlock(&clients_mutex);
+
+        // Shutdown requested. Updates running value to false for all threads
+        atomic_store(&settings.running, false);
+
+
+
+        // Kills reaper thread and joins all client threads
+        sem_post(client_cleanup_sem);
+        pthread_join(reaper, NULL);
+        sem_close(client_cleanup_sem);
+
+        // Destroys client thread attribute
+        pthread_attr_destroy(&client_attr);
+
+
+        // Core library systems always close
+        end_log();
+        int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
+        if (fd_to_close >= 0)
+                close(fd_to_close);
+
+        // Sets init flag to false to allow subsequent server init/run
+        atomic_store(&settings.initialized, false);
+
+	return NULL;	
 }
+
+
 
 // Calls in the beginning of atomicio_init_server() to make a clean slate for config
 static void atomicio_config_reset() {
@@ -354,16 +491,6 @@ static void atomicio_config_reset() {
 	client_cleanup_sem = NULL;	
 }
 
-static void atomicio_sighandlers_reset() {
-	struct sigaction sa_def;
-	sa_def.sa_handler = SIG_DFL;
-	sigemptyset(&sa_def.sa_mask);
-	sa_def.sa_flags = 0;
-	sigaction(SIGINT, &sa_def, NULL);
-	sigaction(SIGTERM, &sa_def, NULL);
-	sigaction(SIGHUP, &sa_def, NULL);
-	sigaction(SIGPIPE, &sa_def, NULL);
-}
 
 
 int atomicio_init_server(const atomicio_config_t* init_settings) {
@@ -397,21 +524,6 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	// Resets internal server data to clean slate
 	atomicio_config_reset();
 	
-	// Handles termination / def flags
-	struct sigaction shutdown_sa = {0};
-        shutdown_sa.sa_handler = shutdown_handler;
-        sigemptyset(&shutdown_sa.sa_mask); // Init mask to empty
-
-	sigaction(SIGINT, &shutdown_sa, NULL);
-	sigaction(SIGTERM, &shutdown_sa, NULL);
-
-	struct sigaction ign_sa = {0};
-        ign_sa.sa_handler = SIG_IGN;
-        // Ensures Server stays open if terminal session closes
-	sigaction(SIGHUP, &ign_sa, NULL);
-        // Ensures failed write() sets errno EPIPE and returns -1 instead of crashing with SIGPIPE
-        sigaction(SIGPIPE, &ign_sa, NULL);
-
 
 	// Sets server settings - fields zeroed out by default
 	settings.max_users = init_settings->max_users;
@@ -424,7 +536,7 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	// MAX_PATH_LEN defined in log.h
 	snprintf(settings.log_path, MAX_PATH_LEN, "%s", init_settings->log_path);
 	
-	// IPv4 TCP default protocol
+	// Creates IPv4 TCP default protocol socket
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd == -1) {
                 perror("Socket creation failed");
@@ -492,8 +604,6 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	if (fd_to_close >= 0)
 		close(fd_to_close);
 	
-	// Returns with error after resetting signal handlers
-	atomicio_sighandlers_reset();
 	return -1;
 }
 
@@ -517,15 +627,11 @@ int atomicio_run() {
 	// Server resources finalized and run begins
 	// ========================================================
 	
-	// Used to ensure proper return value	
-	bool run_error = false;
 	
 	// Creates stack size attribute for client threads (1MB)
-        pthread_attr_t client_attr;
         pthread_attr_init(&client_attr);
         if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
                 fprintf(stderr, "Error setting client thread stack size\n");
-                run_error = true;
 		goto err_destroy_thread_resources;
         }
 	
@@ -536,117 +642,28 @@ int atomicio_run() {
         fflush(stdout);
 
         // Spawns reaper thread to cleanup dead client threads
-        pthread_t reaper;
         if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
                 perror("Failed to spawn reaper thread");
                 atomic_store(&settings.running, false);
-                run_error = true;
-		goto err_kill_reaper;
+		goto err_destroy_thread_resources;
         }
 
 
-	// Server accept loop
-        atomic_store(&server_start_timestamp, now_ms());
-	while (!atomic_load(&shutdown_requested)) {
-
-                struct sockaddr_in new_client;
-                socklen_t adderlen = sizeof(new_client);
-                int client_fd;
-
-                // Checks for accept() error / BLOCKING
-                while (!atomic_load(&shutdown_requested) && ((client_fd = accept(atomic_load(&settings.socket_fd),
-                        (struct sockaddr*)&new_client,
-                        &adderlen)) == -1)) {
+	if (pthread_create(&accepter, NULL, client_accept_thread, NULL) != 0) {
+		perror("Failed to spawn main accept thread");
+		atomic_store(&settings.running, false);
+		goto err_kill_reaper;	
+	}
 	
-			// Another thread closed listening fd (settings.socket_fd) break instantly
-			if (errno == EBADF)
-				break;
-	
-                        else if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS)
-                                sleep(1);
 
-			else if (errno == ENOMEM) {
-				errlog("Main", "Accept", client_fd, errno, "No Mem", "New User");
-				atomic_store(&shutdown_requested, true);
-			}
+	// Successfully begins run
+	return 0;
 
-                        // Depending on error, client either stays or is removed by kernel from accept queue
-                        // Retry accept() always --- EMFILE or ENFILE (fd limit) and ENOBUFS or ENOMEM are network limits. Sleep & retry
-                }
-
-                // Exits server loop if terminated
-                if (atomic_load(&shutdown_requested) || client_fd == -1)
-                        break;
-
-                // Server is full
-                if (atomic_load(&settings.connected_users) >= settings.max_users) {
-                        //send_by_type(client_fd, LOGOUT); // THIS IS EXPENSIVE / TIME CONSUMING FOR SOMEONE NOT EVEN CONNECTED (abusable aswell)
-                        shutdown(client_fd, SHUT_RDWR);
-                        close(client_fd);
-                        continue;
-                }
-
-                // Create new client once accepted
-                client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
-                if (!ct) {
-                        errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
-                        close(client_fd);
-                        break;
-                }
-
-                // Sets file descriptor
-                ct->client_fd = client_fd;
-                atomic_store(&ct->finished, false);
-			
-                // Creates thread & starts IO
-                int rc = pthread_create(&ct->thread, &client_attr, client_io_thread, ct);
-		if (rc == 0) {
-                        // PUBLISHES TO CLIENTS ONLY ON SUCCESS
-                        client_thread_t* old_head;
-                        do {
-                                old_head = (client_thread_t*)atomic_load(&clients);
-                                atomic_store(&ct->next, old_head);
-                                // Indivisible swap if the head hasn't changed / acts as MIPS load-linked & store-conditional
-                        } while (!atomic_compare_exchange_weak(&clients, &old_head, ct));
-
-                        atomic_fetch_add(&settings.connected_users, 1);
-
-                        // Prevents a client from potentially avoiding reaper
-                        // Exact Situation: Client finishes and calls sem_post() before the reaper can see client in the list (because pthread_Create() before adding to list)
-                        if (atomic_load(&ct->finished))
-                                sem_post(client_cleanup_sem);
-                }
-
-                // Failed to create thread (before adding to global list)
-                else {
-                        errlog("Main", "pthread_create", ct->client_fd, rc, "N/A", "N/A"); // Errno not set
-
-                        // Manual cleanup since we cannot reap a nonexistent thread
-                        close(client_fd);
-                        free(ct);
-                }
-
-        }	
 
 
 	// ========================================================
-	// Clean up server resources and reset global fields
+	// Cascading error resources cleanup upon failed run
 	// ========================================================
-
-
-        // Server is closing / finishes all threads for reaper to join
-        pthread_mutex_lock(&clients_mutex);
-        client_thread_t* c = (client_thread_t*)atomic_load(&clients);
-        while (c != NULL) {
-                //send_by_type(c->client_fd, LOGOUT);
-                atomic_store(&c->finished, true);
-                c = (client_thread_t*)atomic_load(&c->next);
-        }
-        pthread_mutex_unlock(&clients_mutex);
-
-	// Shutdown requested. Updates running value to false for all threads
-	atomic_store(&settings.running, false);	
-
 
 
 	// Kills reaper thread and joins all client threads
@@ -666,12 +683,11 @@ int atomicio_run() {
 	if (fd_to_close >= 0)
 		close(fd_to_close);
 
-	// Sets init flag to false / resets sig handlers to allow subsequent server init/run
+	// Sets init flag to false to allow subsequent server init/run
 	atomic_store(&settings.initialized, false);	
-	atomicio_sighandlers_reset();
-		
-	// Return success (0) or failure (-1) based on flags
-	return (run_error) ? -1 : 0;		
+	
+	// Returns on failure	
+	return -1;		
 }
 
 
@@ -679,7 +695,7 @@ int atomicio_shutdown() {
 	if (!atomic_load(&settings.running))
 		return -1;
 
-	// Set exit flag
+	// Set exit flag for main accept thread -> Finalizes shutdown
 	atomic_store(&shutdown_requested, true);		
 
 	// Close listening client to break blocking accept() loop
@@ -688,6 +704,8 @@ int atomicio_shutdown() {
 		close(fd_to_close);
 		return 0; // Successful closure
 	}
+
+	pthread_join(accepter, NULL);
 	
 	return -1; // Already closed in a parallel call
 }
@@ -724,7 +742,10 @@ uint64_t atomicio_getuptime_ms() {
 }
 
 float atomicio_get_avg_latency_multiplier() {
-	return (float)atomic_load(&total_latency) / atomic_load(&late_packets);	
+	uint64_t late_pkts = atomic_load(&late_packets);
+
+	// Returns avg latency or baseline latency of 1.0f if 0 late packets
+	return (late_pkts == 0) ? 1.0 : (float)atomic_load(&total_latency) / late_pkts;
 }
 
 // Returns total packets dropped

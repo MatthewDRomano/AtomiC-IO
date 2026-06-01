@@ -47,7 +47,7 @@ int atomicio_shutdown(void);
 /**
  * Returns the current server state (running / not running)
  */
-bool atomicio_is_running(void):
+bool atomicio_is_running(void);
 
 /**
  * Atomically loads and returns a snapshot count of currently connected clients.
