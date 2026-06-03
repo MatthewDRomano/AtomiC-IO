@@ -42,9 +42,9 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
 /**
  * Cleans up internally allocated client data and frees associated client_ctx struct.
  * Calling destroy while connected to a server will also initiate a clean disconnect.
- * The passed in atomicio_cl_t* is no longer valid after this call
+ * The passed in address to an atomicio_cl_t* invalidates the client ctx setting it to null
  */
-int atomicio_cl_destroy(atomicio_cl_t* client_ctx);
+int atomicio_cl_destroy(atomicio_cl_t** client_ctx_ptr);
 
 // ========================================================
 // 3. RUNTIME DATA FUNCTIONS 
@@ -89,28 +89,28 @@ int atomicio_cl_get_active_user_count(atomicio_cl_t* client_ctx);
  * Returns how long a given client has been connected to an active AtomiC-IO server session in milliseconds.
  * Returns -1 if the client context is not valid 
 */ 
-uint64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx);
+int64_t atomicio_cl_session_uptime(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns how long a given client has been alive (time since creation)
  * Returns -1 if the client context is not valid 
 */ 
-uint64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx);
+int64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns the total number of bytes successfully transmitted to the server
  * Returns -1 if the client context is not valid 
 */ 
-uint64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx);
+int64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx);
 
 
 /**
  * Returns the total number of bytes received from the server
  * Returns -1 if the client context is not valid 
 */
-uint64_t atomicio_cl_get_bytes_received(atomicio_cl_t* client_ctx);
+int64_t atomicio_cl_get_bytes_received(atomicio_cl_t* client_ctx);
 
 // ========================================================
 // 5. USER LOGGING

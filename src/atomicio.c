@@ -24,60 +24,93 @@
 
 #define MIN_PORT 1024
 #define MAX_PORT 49151
-#define CLIENT_STACK (1024 * 256)  // 256 KB
+#define CLIENT_STACK_SIZE (1024 * 256)  // 256 KB
+
+#define ATOMICIO_MAGIC_COOKIE 0x006174696F737600 // " atiosv " 
 
 
+
+// Used to vary unnamed semaphore names per server context (for kernel)
+static _Atomic(unsigned long long) sem_counter = 0ull;
+
+
+// Client data struct
 typedef struct client_thread {
 	pthread_t thread;
 	int client_fd;
 	packet_t data_packet;
 	atomic_bool finished;
 	
-	_Atomic(struct client_thread*) next; // Atomic ptr
+	_Atomic(struct client_thread*) next;
 } client_thread_t;
 
-static _Atomic(client_thread_t*) clients = NULL;
-static pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
-static sem_t* client_cleanup_sem;
-
-// Client thread attribute for limiting stack size
-static pthread_attr_t client_attr;
-
-// Reaper thread and main accept thread
-static pthread_t reaper;
-static pthread_t accepter;
-
-
+// Used to package multiple arguments into client io thread method
 typedef struct {
-	atomic_int connected_users;
-	atomic_bool running;
-	atomic_bool initialized;
-	atomic_int socket_fd; // for listening only
-	int max_users;
-	struct sockaddr_in server;
-	bool devlogs_enabled;
-	bool drop_late_packets;
-	char log_path[MAX_PATH_LEN];
+	atomicio_server_ctx* server_ctx;
+	client_thread_t* ct;
+} cthread_args_t;
+
+// Tracked runtime values
+typedef struct {
+	_Atomic(uint64_t) server_init_epoch;
+	_Atomic(uint64_t) server_run_epoch;
+	_Atomic(uint64_t) packets_dropped;
+	_Atomic(uint64_t) late_packets;
+	_Atomic(uint64_t) total_latency;
+} telemetry_t;
+
+// Server settings struct
+typedef struct {
+        int socket_fd; // for listening / accept only
+        int max_users;
+        struct sockaddr_in server;
+        bool devlogs_enabled;
+        bool drop_late_packets;
+        char log_path[MAX_PATH_LEN];
 } settings_t;
 
-// Internal settings struct / fields set to 0
-static settings_t settings = {0};
-// Global server metadata
-static _Atomic(uint64_t) server_start_timestamp;
-static _Atomic(uint64_t) packets_dropped;
-static _Atomic(uint64_t) late_packets;
-static _Atomic(float) total_latency;
 
-// Atomic shutdown flag - thread safe and natively lock-free (async safe) on most systems
-static _Atomic bool shutdown_requested = false;
+typedef enum {
+	STATE_OFFLINE,
+	STATE_ONLINE
+} server_state_t;
+
+// Server context struct
+struct atomicio_server_ctx {
+	uint64_t token;					// Used to ensure an atomicio_server_ctx* is what's passed into methods
+
+	// Client fields
+	_Atomic(client_thread_t*) clients;		// client_thread_t linked list
+	pthread_mutex_t clients_mutex;			// Used to avoid races that stem from editing linked list structure
+	pthread_attr_t client_attr;			// Used for limiting thread stack size
+	sem_t* clients_cleanup_sem;			// Used to signal reaper thread to cleanup client resources
+
+	// Thread IDs
+	pthread_t reaper_tid;
+	pthread_t accepter_tid;	
+	
+	// Server settings and tracked metadata
+	settings_t settings;
+	telemetry_t metadata;
+
+	// Runtime status fields
+	_Atomic(server_state_t) state;	
+	_Atomic int connected_users;
+	_Atomic bool shutdown_requested;
+};
+
+
+
+
+
 
 
 
 // Checks for finished clients to remove
-static bool has_dead_clients() {
+static bool has_dead_clients(atomicio_server_ctx* server_ctx) {
 	// Grabs a snapshot of the current list (
 	// Asides from adding a new head, the list cannot be changed during loop as this method halts reaper
-	client_thread_t* ct = atomic_load(&clients);
+	client_thread_t* ct = atomic_load(&server_ctx->clients);
 	while (ct != NULL) {
 		if (atomic_load(&ct->finished)) 
 			return true;
@@ -108,30 +141,31 @@ static void cleanup_client(client_thread_t* ct) {
 
 // Handles cleaning up client_thread_t resources when set to finished
 static void* reaper_thread(void* arg) {
-	
+	atomicio_server_ctx* server_ctx = (atomicio_server_ctx*)arg;	
+
 	// Ensures a final sweep happens when the server is shutting down
 	int final_sweep_flag = 1;
-	while(atomic_load(&settings.running) || final_sweep_flag-- == 1) {
+	while(atomic_load(&server_ctx->state) == STATE_ONLINE || final_sweep_flag-- == 1) {
 	
 		// Ignores spurious wake ups while the server is running
 		// Thread waits until a client is marked as finished, or server is shutting down	
-		while (atomic_load(&settings.running) && !has_dead_clients()) {
-			sem_wait(client_cleanup_sem);
+		while (atomic_load(&server_ctx->state) == STATE_ONLINE && !has_dead_clients(server_ctx)) {
+			sem_wait(server_ctx->clients_cleanup_sem);
 		}
 
 		// At this point a final sweep is already occurring
-		if (!atomic_load(&settings.running)) {
+		if (atomic_load(&server_ctx->state) == STATE_OFFLINE) {
 			final_sweep_flag = 0; // Prevents outer loop from allowing another sweep
 		}
 		
-		while (sem_trywait(client_cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
-			; // Drains client_cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
+		while (sem_trywait(server_ctx->clients_cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement
+			; // Drains clients_cleanup_sem to 0; Only one iteration is needed to remove ALL dead clients
 		}
 
 
 		// pp tracks list element addresses (manages list), ct is atomically loaded client_thread_t
 		// This approach works under the assumption no other thread can add to / remove from the list asides from prepending the head
-		_Atomic(client_thread_t*)* pp = &clients;
+		_Atomic(client_thread_t*)* pp = &server_ctx->clients;
 		client_thread_t* ct = (client_thread_t*)atomic_load(pp);
 
 		while (ct != NULL) {
@@ -140,22 +174,22 @@ static void* reaper_thread(void* arg) {
 				client_thread_t* next_node = (client_thread_t*)atomic_load(&ct->next);
 				
 				// Mutex ensures a dead client is removed before other threads access clients list
-				pthread_mutex_lock(&clients_mutex);
+				pthread_mutex_lock(&server_ctx->clients_mutex);
 				
 				// This block executes if ct no longer matches *pp. Update ct and try the loop iteration again
 				// exchange_strong ensures no spurious failures, and catches linked list updates due to untimely context switches
 				if (!atomic_compare_exchange_strong(pp, &ct, next_node)) {
-					pthread_mutex_unlock(&clients_mutex);
+					pthread_mutex_unlock(&server_ctx->clients_mutex);
 					ct = (client_thread_t*)atomic_load(pp);
 					continue;
 				}
 
 				// Exchange/client removal was a success. Clean up client resources
-				pthread_mutex_unlock(&clients_mutex);
+				pthread_mutex_unlock(&server_ctx->clients_mutex);
 	
 				// Closes client connection and frees associated client_thread_t data
 				cleanup_client(ct);
-				atomic_fetch_sub(&settings.connected_users, 1);	
+				atomic_fetch_sub(&server_ctx->connected_users, 1);	
 	
 			}
 				
@@ -174,7 +208,7 @@ static void* reaper_thread(void* arg) {
 }
 
 // Assumes clients mutex unlocked
-static int send_by_type(int sock_fd, message_type_t msg_type) {
+static int send_by_type(atomicio_server_ctx* server_ctx, int sock_fd, message_type_t msg_type) {
 	// C11 standard keyword to allocate this array once PER THREAD
 	// This array resides in TLS segment of virtual memory 
 	// And is in the same allocated block as stack when calling pthread_create() so consider this with pthread_attr
@@ -182,9 +216,9 @@ static int send_by_type(int sock_fd, message_type_t msg_type) {
 	const size_t n = sizeof(packet_t);
 	int i = 0;
 
-	pthread_mutex_lock(&clients_mutex);
-	int active_users = atomic_load(&settings.connected_users);
-	client_thread_t* c = (client_thread_t*)atomic_load(&clients);
+	pthread_mutex_lock(&server_ctx->clients_mutex);
+	int active_users = atomic_load(&server_ctx->connected_users);
+	client_thread_t* c = (client_thread_t*)atomic_load(&server_ctx->clients);
 
 	uint16_t net_type = htons((uint16_t)msg_type);
 	uint16_t net_act_usrs = htons((uint16_t)active_users);
@@ -198,7 +232,7 @@ static int send_by_type(int sock_fd, message_type_t msg_type) {
 		i++;
 		c = (client_thread_t*)atomic_load(&c->next);
 	}
-	pthread_mutex_unlock(&clients_mutex);
+	pthread_mutex_unlock(&server_ctx->clients_mutex);
 
 	// Sends all 'i' clients' data processed above	
 	return full_write(sock_fd, all_client_packets, i);
@@ -216,8 +250,9 @@ static uint64_t now_ms() {
 
 
 // Performs IO with client
-static void* client_io_thread(void* arg) {	
-	client_thread_t* ct = (client_thread_t*)arg;	
+static void* client_io_thread(void* args) {	
+	atomicio_server_ctx* server_ctx = ((cthread_args_t*)args)->server_ctx;
+	client_thread_t* ct = ((cthread_args_t*)args)->ct;
 
 	struct pollfd pfd;
 
@@ -277,9 +312,9 @@ static void* client_io_thread(void* arg) {
 					break;
 				}
 				
-				pthread_mutex_lock(&clients_mutex);
+				pthread_mutex_lock(&server_ctx->clients_mutex);
 				memcpy(&ct->data_packet, &inbound_packet, sizeof(packet_t));
-				pthread_mutex_unlock(&clients_mutex);
+				pthread_mutex_unlock(&server_ctx->clients_mutex);
 				
 
 				switch ((message_type_t)ntohs(inbound_packet.type)) {
@@ -304,22 +339,22 @@ static void* client_io_thread(void* arg) {
 		if ((delay = (now - last_send_time)) >= NETWORK_TRANSFER_PERIOD) {
 			// Update server metadata (late packets / latency)
 			float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
-			float tl = atomic_load(&total_latency);
-			atomic_store(&total_latency, tl + latency_ratio);
-			atomic_fetch_add(&late_packets, 1);
+			float tl = atomic_load(&server_ctx->metadata.total_latency);
+			atomic_store(&server_ctx->metadata.total_latency, tl + latency_ratio);
+			atomic_fetch_add(&server_ctx->metadata.late_packets, 1);
 
 			// Devlogs for packets that reached drop threshold
-			if (delay >= PACKET_DROP_THRESHOLD && settings.devlogs_enabled) {
+			if (delay >= PACKET_DROP_THRESHOLD && server_ctx->settings.devlogs_enabled) {
 				// Determine status tag based on policy
-				const char* status = (settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
+				const char* status = (server_ctx->settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
 				char msg[MAX_MSG_LEN];
 				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", inbound_packet.client_uuid, latency_ratio, status);
 				msglog(msg);
 			}
 			
 			// Drop packets if specified
-			if (delay >= PACKET_DROP_THRESHOLD && settings.drop_late_packets) {
-				atomic_fetch_add(&packets_dropped, 1);			
+			if (delay >= PACKET_DROP_THRESHOLD && server_ctx->settings.drop_late_packets) {
+				atomic_fetch_add(&server_ctx->metadata.packets_dropped, 1);			
 				last_send_time = now_ms();
 				continue;
 			}
@@ -327,7 +362,7 @@ static void* client_io_thread(void* arg) {
 			// Send packet to client	
 			last_send_time = now;
 			int result;
-                        if ((result = send_by_type(io_fd, UPDATE_MESSAGE)) != 0) {
+                        if ((result = send_by_type(server_ctx, io_fd, UPDATE_MESSAGE)) != 0) {
                         	char dc_msg[MAX_MSG_LEN];
                                 snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
                                 msglog(dc_msg); 
@@ -338,24 +373,26 @@ static void* client_io_thread(void* arg) {
 	}
 	
 	close(io_fd);
-	sem_post(client_cleanup_sem);
+	sem_post(server_ctx->clients_cleanup_sem);
+	free(args);
 
 	return NULL;
 }
 
 
 static void* client_accept_thread(void* arg) {
+	atomicio_server_ctx* server_ctx = (atomicio_server_ctx*)arg;
 	
 	// Server accept loop
-        atomic_store(&server_start_timestamp, now_ms());
-        while (!atomic_load(&shutdown_requested)) {
+        atomic_store(&server_ctx->metadata.server_run_epoch, now_ms());
+        while (!atomic_load(&server_ctx->shutdown_requested)) {
 
                 struct sockaddr_in new_client;
                 socklen_t adderlen = sizeof(new_client);
                 int client_fd = -1;
 
                 // Checks for accept() error / BLOCKING
-                while (!atomic_load(&shutdown_requested) && ((client_fd = accept(atomic_load(&settings.socket_fd),
+                while (!atomic_load(&server_ctx->shutdown_requested) && ((client_fd = accept(atomic_load(&server_ctx->settings.socket_fd),
                         (struct sockaddr*)&new_client,
                         &adderlen)) == -1)) {
 
@@ -368,7 +405,7 @@ static void* client_accept_thread(void* arg) {
 
                         else if (errno == ENOMEM) {
                                 errlog("Main", "Accept", client_fd, errno, "No Mem", "New User");
-                                atomic_store(&shutdown_requested, true);
+                                atomic_store(&server_ctx->shutdown_requested, true);
                         }
 
                         // Depending on error, client either stays or is removed by kernel from accept queue
@@ -376,11 +413,11 @@ static void* client_accept_thread(void* arg) {
                 }
 
                 // Exits server loop if terminated
-                if (atomic_load(&shutdown_requested) || client_fd == -1)
+                if (atomic_load(&server_ctx->shutdown_requested) || client_fd == -1)
                         break;
 
                 // Server is full
-                if (atomic_load(&settings.connected_users) >= settings.max_users) {
+                if (atomic_load(&server_ctx->connected_users) >= server_ctx->settings.max_users) {
                         //send_by_type(client_fd, LOGOUT); // THIS IS EXPENSIVE / TIME CONSUMING FOR SOMEONE NOT EVEN CONNECTED (abusable aswell)
                         shutdown(client_fd, SHUT_RDWR);
                         close(client_fd);
@@ -390,32 +427,46 @@ static void* client_accept_thread(void* arg) {
                 // Create new client once accepted
                 client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
                 if (!ct) {
-                        errlog("Main", "Calloc", -1, errno, "N/A", "N/A");
+                        errlog("Main", "calloc", -1, errno, "N/A", "N/A");
                         close(client_fd);
                         break;
                 }
 
-                // Sets file descriptor
+                // Sets file descriptor / finished to false
                 ct->client_fd = client_fd;
                 atomic_store(&ct->finished, false);
 
+		// Allocate memory for client thread arguments --> server_ctx and ct
+		// To be freed by the client thread upon success
+		cthread_args_t* ct_thread_args = (cthread_args_t*)malloc(sizeof(cthread_args_t));
+		if (!ct_thread_args) {
+			errlog("Main", "malloc", -1, errno, "Client thread args allocation", "N/A");
+			close(client_fd);
+			free(ct);
+			break;
+		}
+
+		// Set arg fields
+		ct_thread_args->server_ctx = server_ctx;
+		ct_thread_args->ct = ct;
+
                 // Creates thread & starts IO
-                int rc = pthread_create(&ct->thread, &client_attr, client_io_thread, ct);
+                int rc = pthread_create(&ct->thread, &server_ctx->client_attr, client_io_thread, (void*)ct_thread_args);
 		if (rc == 0) {
                         // PUBLISHES TO CLIENTS ONLY ON SUCCESS
                         client_thread_t* old_head;
                         do {
-                                old_head = (client_thread_t*)atomic_load(&clients);
+                                old_head = (client_thread_t*)atomic_load(&server_ctx->clients);
                                 atomic_store(&ct->next, old_head);
                                 // Indivisible swap if the head hasn't changed / acts as MIPS load-linked & store-conditional
-                        } while (!atomic_compare_exchange_weak(&clients, &old_head, ct));
+                        } while (!atomic_compare_exchange_weak(&server_ctx->clients, &old_head, ct));
 
-                        atomic_fetch_add(&settings.connected_users, 1);
+                        atomic_fetch_add(&server_ctx->connected_users, 1);
 
                         // Prevents a client from potentially avoiding reaper
                         // Exact Situation: Client finishes and calls sem_post() before the reaper can see client in the list (because pthread_Create() before adding to list)
                         if (atomic_load(&ct->finished))
-                                sem_post(client_cleanup_sem);
+                                sem_post(server_ctx->clients_cleanup_sem);
                 }
 
                 // Failed to create thread (before adding to global list)
@@ -424,8 +475,10 @@ static void* client_accept_thread(void* arg) {
 
                         // Manual cleanup since we cannot reap a nonexistent thread
                         close(client_fd);
-                        free(ct);
+                        free(ct_thread_args);
+			free(ct);
                 }
+
 	}
 		
 	
@@ -435,120 +488,108 @@ static void* client_accept_thread(void* arg) {
 
 
 // Calls in the beginning of atomicio_init_server() to make a clean slate for config
-static void atomicio_config_reset() {
-	// Reset the core execution flags
-	atomic_store(&shutdown_requested, false);
-	atomic_store(&settings.running, false);
-	atomic_store(&settings.initialized, false);
-
-	// Reset runtime metrics
-	atomic_store(&settings.connected_users, 0);
-	atomic_store(&settings.socket_fd, -1);
-	atomic_store(&server_start_timestamp, -1);
-	atomic_store(&packets_dropped, 0);
-	atomic_store(&late_packets, 0);
-	atomic_store(&total_latency, 0.0f);
+static void atomicio_config_init(atomicio_server_ctx* server_ctx) {
 	
 	// Clear linked list head and semaphore
-	atomic_store(&clients, NULL);	
-	client_cleanup_sem = NULL;	
+        atomic_init(&server_ctx->clients, NULL);
+        server_ctx->clients_cleanup_sem = NULL;
+
+	// Set clean slate network fields
+	server_ctx->settings = (settings_t){0};
+	server_ctx->settings.socket_fd = -1;
+	
+	// Clear runtime metrics
+	atomic_init(&server_ctx->connected_users, 0);
+	atomic_init(&server_ctx->metadata.server_run_epoch, -1);
+	atomic_init(&server_ctx->metadata.packets_dropped, 0);
+	atomic_init(&server_ctx->metadata.late_packets, 0);
+	atomic_init(&server_ctx->metadata.total_latency, 0.0f);
+
+	// Set the default core execution flags
+        atomic_init(&server_ctx->shutdown_requested, false);
 }
 
 
 
-int atomicio_init_server(const atomicio_config_t* init_settings) {
+atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settings) {
 	
 	// ========================================================
-	// Invalid conditions to begin initialization
+	// Invalid config settings
 	// ========================================================
 	
-	if (atomic_load(&settings.running) || atomic_load(&settings.initialized)) {
-                fprintf(stderr, "Server already running and/or initialized\n");
-		return -1;
-	}
-
-	// Invalid fields
 	if (init_settings->port < MIN_PORT || init_settings->port > MAX_PORT) {
 		fprintf(stderr, "Port not in range: [%d, %d]", MIN_PORT, MAX_PORT);
-		return -1;
+		return NULL;
 	}	
 	
 	if (init_settings->max_users < 1 || init_settings->max_users > MAX_CONNECTIONS) {
 		fprintf(stderr, "Max_users not valid. Range: [%d, %d]\n", 1, MAX_CONNECTIONS);
-                return -1;
+                return NULL;
 	}
 
 
 	// ========================================================
-	// Initialize global fields and server resources
+	// Server context creation --> Field instantiation
 	// ========================================================
 
+	// Allocate memory for new server context
+	atomicio_server_ctx* new_server_ctx = (atomicio_server_ctx*)malloc(sizeof(atomicio_server_ctx));
+	if (!new_server_ctx) {
+		fprintf(stderr, "Error allocating memory for server\n");
+		return NULL;
+	}
 
-	// Resets internal server data to clean slate
-	atomicio_config_reset();
-	
+	// Sets internal server data/config to clean slate
+	atomicio_config_init(new_server_ctx);
 
-	// Sets server settings - fields zeroed out by default
-	settings.max_users = init_settings->max_users;
-	settings.devlogs_enabled = init_settings->devlogs_enabled;	
-	settings.drop_late_packets = init_settings->drop_late_packets;
-	settings.server.sin_family = AF_INET;
-        settings.server.sin_port = htons(init_settings->port);
-        settings.server.sin_addr.s_addr = INADDR_ANY;
+	// Sets server settings based on user args - fields zeroed out by default
+	new_server_ctx->settings.max_users = init_settings->max_users;
+	new_server_ctx->settings.devlogs_enabled = init_settings->devlogs_enabled;	
+	new_server_ctx->settings.drop_late_packets = init_settings->drop_late_packets;
+	new_server_ctx->settings.server.sin_family = AF_INET;
+        new_server_ctx->settings.server.sin_port = htons(init_settings->port);
+        new_server_ctx->settings.server.sin_addr.s_addr = INADDR_ANY;
+	snprintf(new_server_ctx->settings.log_path, MAX_PATH_LEN, "%s", init_settings->log_path); // MAX_PATH_LEN defined in log.h
 	
-	// MAX_PATH_LEN defined in log.h
-	snprintf(settings.log_path, MAX_PATH_LEN, "%s", init_settings->log_path);
-	
-	// Creates IPv4 TCP default protocol socket
-	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (listen_fd == -1) {
-                perror("Socket creation failed");
-                return -1;
-        }
-	
-	// Copy fd to global settings 
-	atomic_store(&settings.socket_fd, listen_fd);
-
-	// SO_REUSEADDR Allows rebind to same port after server termination w/o a delay
-        // regardless if clients in TIME_WAIT or not
-        int opt = 1;
-        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        // Binds server to socket w/ above socket config
-        while (bind(listen_fd, (struct sockaddr*)(&settings.server), sizeof(settings.server)) == -1) {
-                if (errno == EINTR)
-                        continue;
-                perror("Bind to port failed");
-                goto err_close_socket;
+	// Creates stack size attribute for client threads --> stack + TLS (256KB)
+        pthread_attr_init(&new_server_ctx->client_attr);
+        if (pthread_attr_setstacksize(&new_server_ctx->client_attr, CLIENT_STACK_SIZE) != 0) {
+                fprintf(stderr, "Error setting client thread stack size\n");
+                goto err_free_server_mem;
         }
 
-        // Starts listening on socket
-        while (listen(listen_fd, settings.max_users) == -1) {
-                if (errno == EINTR)
-                        continue;
-                perror("Error while attmepting to listen on socket");
-                goto err_close_socket;
-        }
+	// Initialize the clients linked list mutex
+	pthread_mutex_init(&new_server_ctx->clients_mutex, NULL);
+	
 
 
         // Creates semaphore w/ owner read / write, otherwise read only
-        client_cleanup_sem = sem_open("/client_cleanup_sem", O_CREAT, 0644, 0);
-        if (client_cleanup_sem == SEM_FAILED) {
+        char sem_name[MAX_PATH_LEN];
+	unsigned long long unique_sem_id = atomic_fetch_add(&sem_counter, 1ull);
+	snprintf(sem_name, MAX_PATH_LEN, "/clients_cleanup_sem_%llu", unique_sem_id);
+        
+	new_server_ctx->clients_cleanup_sem = sem_open(sem_name, O_CREAT, 0644, 0);
+        if (new_server_ctx->clients_cleanup_sem == SEM_FAILED) {
                 perror("Failed to create client cleanup semaphore");
-                goto err_close_socket;
+		// Do not subtract sem_count, just burn the id value
+                goto err_destroy_thread_attr;
         }
-        // Unlinks named semaphore from kernel
+
+        // Unlinks named semaphore from kernel and adds to static global counter
         // Semaphore now persists for server lifetime instead of in kernel indefinitely
-        sem_unlink("/client_cleanup_sem");
+        sem_unlink(sem_name);
 
         // Error opening error log; treated as catastrophic
-        if (init_log(settings.log_path) != 0)
-                goto err_close_log;
+        if (init_log(new_server_ctx->settings.log_path) != 0)
+                goto err_close_sem;
 
 	
-	// No error
-	atomic_store(&settings.initialized, true);
-	return 0;
+	// No error --> set proper state and stamp server context token
+	atomic_init(&new_server_ctx->state, STATE_OFFLINE);
+	new_server_ctx->token = ATOMICIO_MAGIC_COOKIE;
+	atomic_init(&new_server_ctx->metadata.server_init_epoch, now_ms());
+	
+	return new_server_ctx;
 
 
 	// ========================================================
@@ -556,70 +597,97 @@ int atomicio_init_server(const atomicio_config_t* init_settings) {
 	// ========================================================
 
 
-	// Closes log
-	err_close_log:
-	end_log();
-	sem_close(client_cleanup_sem);
+	// Closes semaphore
+	err_close_sem:
+	sem_close(new_server_ctx->clients_cleanup_sem);
 	
-	// Closes socket - safely scrubs global state if initialization fails
-	err_close_socket:
-	int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-	if (fd_to_close >= 0)
-		close(fd_to_close);
-	
-	return -1;
+	err_destroy_thread_attr:
+	pthread_attr_destroy(&new_server_ctx->client_attr);
+
+	// Finally free allocated context and return
+	err_free_server_mem:
+	free(new_server_ctx);	
+
+	return NULL;
 }
 
 
-int atomicio_run() {
+int atomicio_server_run(atomicio_server_ctx* server_ctx) {
+	
 	// ========================================================
 	// Invalid conditions to begin running server
 	// ========================================================
+
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
 	
-	if (atomic_load(&settings.running)) {
+	if (atomic_load(&server_ctx->state) == STATE_ONLINE) {
 		fprintf(stderr, "Server already running!!!\n");
 		return -1;
 	}
 	
-	if (!atomic_load(&settings.initialized)) {
-		fprintf(stderr, "Failed to run. Server not initialized\n");
-		return -1;
-	}
 	
 	// ========================================================
 	// Server resources finalized and run begins
 	// ========================================================
-	
-	
-	// Creates stack size attribute for client threads (1MB)
-        pthread_attr_init(&client_attr);
-        if (pthread_attr_setstacksize(&client_attr, CLIENT_STACK) != 0) {
-                fprintf(stderr, "Error setting client thread stack size\n");
-		goto err_destroy_thread_resources;
+
+
+	// Creates IPv4 TCP default protocol socket
+        int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd == -1) {
+                perror("Socket creation failed");
+                return -1;
+        }
+
+
+        // Copy fd to global settings
+        atomic_store(&server_ctx->settings.socket_fd, listen_fd);
+
+        // SO_REUSEADDR Allows rebind to same port after server termination w/o a delay
+        // regardless if clients in TIME_WAIT or not
+        int opt = 1;
+        setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        // Binds server to socket w/ above socket config
+        while (bind(listen_fd, (struct sockaddr*)(&server_ctx->settings.server), sizeof(server_ctx->settings.server)) == -1) {
+                if (errno == EINTR)
+                        continue;
+                perror("Bind to port failed");
+                goto err_close_server_rsrcs;
+        }
+		
+	// Starts listening on socket
+        while (listen(server_ctx->settings.socket_fd, server_ctx->settings.max_users) == -1) {
+                if (errno == EINTR)
+                        continue;
+                perror("Error while attmepting to listen on socket");
+                goto err_close_server_rsrcs;
         }
 	
 	// Server is "running"
-        atomic_store(&settings.running, true);
-        fprintf(stdout, "Server Listening on port: %d\n", ntohs(settings.server.sin_port));
-        fprintf(stdout, "Max users: %d\n", settings.max_users);
+        atomic_store(&server_ctx->state, STATE_ONLINE);
+        fprintf(stdout, "Server Listening on port: %d\n", ntohs(server_ctx->settings.server.sin_port));
+        fprintf(stdout, "Max users: %d\n", server_ctx->settings.max_users);
         fflush(stdout);
 
         // Spawns reaper thread to cleanup dead client threads
-        if (pthread_create(&reaper, NULL, reaper_thread, NULL) != 0) {
+        if (pthread_create(&server_ctx->reaper_tid, NULL, reaper_thread, server_ctx) != 0) {
                 perror("Failed to spawn reaper thread");
-                atomic_store(&settings.running, false);
-		goto err_destroy_thread_resources;
+                //atomic_store(&settings.running, false);
+		goto err_close_server_rsrcs;
         }
 
 
-	if (pthread_create(&accepter, NULL, client_accept_thread, NULL) != 0) {
+
+	if (pthread_create(&server_ctx->accepter_tid, NULL, client_accept_thread, server_ctx) != 0) {
 		perror("Failed to spawn main accept thread");
-		atomic_store(&settings.running, false);
+		atomic_store(&server_ctx->state, STATE_OFFLINE);
 		goto err_kill_reaper;	
 	}
 	
 
 	// Successfully begins run
+	atomic_store(&server_ctx->metadata.server_start_timestamp, now_ms());
 	return 0;
 
 
@@ -631,54 +699,36 @@ int atomicio_run() {
 
 	// Kills reaper thread and joins all client threads
 	err_kill_reaper:
-	sem_post(client_cleanup_sem);
-        pthread_join(reaper, NULL);
-        sem_close(client_cleanup_sem);	
+	sem_post(server_ctx->clients_cleanup_sem);
+        pthread_join(server_ctx->reaper_tid, NULL);
+        sem_close(server_ctx->clients_cleanup_sem);	
 	
-	// Destroys client thread attribute
-	err_destroy_thread_resources:
-        pthread_attr_destroy(&client_attr);
-
-		
-	// Core library systems always close
+	// Closes log and listening fd
+	err_close_server_rsrcs:
 	end_log();
-	int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
+	int fd_to_close = atomic_exchange(&server_ctx->settings.socket_fd, -1);
 	if (fd_to_close >= 0)
 		close(fd_to_close);
 
-	// Sets init flag to false to allow subsequent server init/run
-	atomic_store(&settings.initialized, false);	
+	// Ensures init flag is false to allow subsequent server init/run
+	atomic_store(&server_ctx->state, STATE_OFFLINE);	
 	
 	// Returns on failure	
 	return -1;		
 }
 
 
-int atomicio_shutdown() {
+int atomicio_server_shutdown(atomicio_server_ctx* server_ctx) {
 
-	// Executes if the server is not running
-	if (!atomic_load(&settings.running)) {
-		// Clean up possible server init resources 
-		if (atomic_load(&settings.initialized)) {
-        		sem_close(client_cleanup_sem);
+	// Valid context arg check
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
 
-			int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
-        		if (fd_to_close >= 0) {
-                		shutdown(fd_to_close, SHUT_RDWR); // needed to wake accept() block
-				close(fd_to_close);
-			}
-		
-			end_log();
-	
-			atomic_store(&settings.initialized, false);
-			return 0;
-		}
-	
-		// Otherwise return -1 if the server is not running nor initialized
-		// Nothing to shutdown!
+	// Ensures proper server state
+	if (atomic_load(&server_ctx->state) == STATE_OFFLINE) {
+		fprintf(stderr, "Cannot shutdown, as server is not connected\n");
 		return -1;
 	}
-
 
 	// ========================================================
 	// Proper shutdown sequence of a running server below
@@ -686,10 +736,10 @@ int atomicio_shutdown() {
 
 
 	// Set exit flag for main accept thread -> Begins shutdown
-	atomic_store(&shutdown_requested, true);		
+	atomic_store(&server_ctx->shutdown_requested, true);		
 
 	// Close listening client to break blocking accept() loop
-	int fd_to_close = atomic_exchange(&settings.socket_fd, -1);
+	int fd_to_close = atomic_exchange(&server_ctx->settings.socket_fd, -1);
 	if (fd_to_close >= 0) {
 		shutdown(fd_to_close, SHUT_RDWR); // needed to wake accept() block
 		close(fd_to_close);
@@ -697,7 +747,7 @@ int atomicio_shutdown() {
 
 
 	// Waits for accepter thread to finish 
-	pthread_join(accepter, NULL);
+	pthread_join(server_ctx->accepter_tid, NULL);
 	
 
 	// ========================================================
@@ -706,49 +756,83 @@ int atomicio_shutdown() {
 
 
         // Server is closing / finishes all threads & shuts down connection for reaper to join
-        pthread_mutex_lock(&clients_mutex);
-        client_thread_t* c = (client_thread_t*)atomic_load(&clients);
-        while (c != NULL) {
+        pthread_mutex_lock(&server_ctx->clients_mutex);
+        client_thread_t* ct = (client_thread_t*)atomic_load(&server_ctx->clients);
+        while (ct != NULL) {
                 //send_by_type(c->client_fd, LOGOUT);
-                atomic_store(&c->finished, true);
+                atomic_store(&ct->finished, true);
                 //shutdown(c->client_fd, SHUT_RDWR);
-		c = (client_thread_t*)atomic_load(&c->next);
+		ct = (client_thread_t*)atomic_load(&ct->next);
         }
-        pthread_mutex_unlock(&clients_mutex);
+        pthread_mutex_unlock(&server_ctx->clients_mutex);
 
         // Shutdown requested. Updates running value to false for all threads
-        atomic_store(&settings.running, false);
+        atomic_store(&server_ctx->state, STATE_OFFLINE);
 
 
         // Kills reaper thread and joins all client threads
-        sem_post(client_cleanup_sem);
-        pthread_join(reaper, NULL);
-        sem_close(client_cleanup_sem);
+        sem_post(server_ctx->clients_cleanup_sem);
+        pthread_join(server_ctx->reaper_tid, NULL);
+        //sem_close(server_ctx->clients_cleanup_sem); PUT IN DESTROY METHOD
+
+	// Defensive store to ensure linked list is not pointing to garbage data
+	atomic_store(&server_ctx->clients, NULL);
 
         // Destroys client thread attribute
-        pthread_attr_destroy(&client_attr);
+        //pthread_attr_destroy(&server_ctx->client_attr); PUT IN DESTROY METHOD
 
+	// RESET shutdown flag to allow subsequent runs
+	atomic_store(&server_ctx->shutdown_requested, false);
 
         // Close log
-        end_log();
-
-        // Sets init flag to false to allow subsequent server init/run
-        atomic_store(&settings.initialized, false);
+        //end_log(); PUT IN DESTROY METHOD
 
 	return 0;
 }
 
+
+int atomicio_server_destroy(atomicio_server_ctx** server_ctx_ptr) {
+	if (!server_ctx_ptr)
+		return -1;
+
+	atomicio_server_ctx* server_ctx = *server_ctx_ptr;	
+
+	// Ensures a valid server is passed
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
+
+	// Shutsdwon server if necessary 
+	if (atomic_load(&server_ctx->state) == STATE_ONLINE)
+		atomicio_server_shutdown(server_ctx);
+
+	// Destroy server context internal data
+	pthread_mutex_destroy(&server_ctx->clients_mutex);
+	pthread_attr_destroy(&server_ctx->client_attr);
+	sem_close(server_ctx->clients_cleanup_sem);
+	
+	// Close log instance
+	end_log();
+
+	// Brick the magic cookie to invalidate stale pointers
+	server_ctx->token = 0ull;
+
+	free(server_ctx);
+	*server_ctx_ptr = NULL;
+	return 0;
+}
+
+
+
 // Returns true if server is running, otherwise false
-bool atomicio_is_running() {
-	return atomic_load(&settings.running);
+bool atomicio_is_running(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+		return false; // Returns false on structural API error
+	
+	return atomic_load(&server_ctx->state) == STATE_ONLINE;
 }
 
 // Logs a message
 void atomicio_log(const char* msg) {
-	if (!atomic_load(&settings.initialized)) {
-		fprintf(stderr, "Logging failed (Log not open). Must initialize AtomiC-IO server\n");
-		return;
-	}
 
 	// Passes along log message
 	msglog(msg);		
@@ -756,27 +840,48 @@ void atomicio_log(const char* msg) {
 
 
 // Returns current user count
-int atomicio_get_active_user_count() {
-	return atomic_load(&settings.connected_users);
+int atomicio_get_active_user_count(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
+
+	return atomic_load(&server_ctx->connected_users);
 }
 
-// Returns current server uptime
-uint64_t atomicio_getuptime_ms() {
-	// Server not running. Uptime is N/A
-	if (!atomic_load(&settings.running))
-		return 0;
+// Returns overall server context uptime
+int64_t atomicio_get_overall_uptime_ms(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
 
-	return now_ms() - atomic_load(&server_start_timestamp);
+
+	return now_ms() - atomic_load(&server_ctx->metadata.server_init_epoch);
 }
 
-float atomicio_get_avg_latency_multiplier() {
-	uint64_t late_pkts = atomic_load(&late_packets);
+// Returns current session server context up time
+int64_t atomicio_get_session_uptime_ms(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+		return -1; // Returns -1 on structural API error
+	
+	// Server not running. Uptime is 0
+        if (atomic_load(&server_ctx->state) == STATE_OFFLINE)
+                return 0;
+
+	return now_ms() - atomic_load(&server_ctx->metadata.server_run_epoch);	
+}
+
+float atomicio_get_avg_latency_multiplier(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return 1.0f; // Returns default 1.0 on structural API error
+
+	uint64_t late_pkts = atomic_load(&server_ctx->metadata.late_packets);
 
 	// Returns avg latency or baseline latency of 1.0f if 0 late packets
-	return (late_pkts == 0) ? 1.0 : (float)atomic_load(&total_latency) / late_pkts;
+	return (late_pkts == 0) ? 1.0f : (float)atomic_load(&server_ctx->metadata.total_latency) / late_pkts;
 }
 
 // Returns total packets dropped
-uint64_t atomicio_get_dropped_packets_count() {
-	return atomic_load(&packets_dropped);
+int64_t atomicio_get_dropped_packets_count(atomicio_server_ctx* server_ctx) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
+
+	return atomic_load(&server_ctx->metadata.packets_dropped);
 }	

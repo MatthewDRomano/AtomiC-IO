@@ -7,6 +7,9 @@
 // ========================================================
 // 1. PUBLIC CONFIGURATION INTERFACE
 // ========================================================
+
+typedef struct atomicio_server_ctx atomicio_server_ctx; 
+
 typedef struct {
 	uint16_t port;			// Active binding port
 	int max_users;			// Limit of simultaneous connections
@@ -20,24 +23,35 @@ typedef struct {
 // ========================================================
 
 /**
- * Configures the internal server structure and sets socket parameters,
+ * Configures the internal server structure and sets socket parameters (Port, Protocol, etc),
  * and initiates server log thread.
  * If succesful, atomicio_shutdown() will need to be called eventually to cleanup server resources.
+ *
+ * Returns a valid server context to the user, allocated on the heap
  */ 
-int atomicio_init_server(const atomicio_config_t* init_settings);
+atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settings);
 
 /**
- * Executes the main blocking client accept loop.
+ * Begins listening on the internal socket, and spawns the client accept thread & client cleanup reaper thread.
  * Call this after a successful initialization to boot the server application.
  */ 
-int atomicio_run(void);
+int atomicio_server_run(atomicio_server_ctx* server_ctx);
 
 /**
  * Sets execution flags to false and performs a graceful shutdown.
  * Shutdown order: Shutdown flags set, Signal reaper thread to cleanup client resources,
  * close all open connections, flush remaining log entries, and close log.
+ *
+ * atomicio_run may be called again upon a successful shutdown
  */ 
-int atomicio_shutdown(void);
+int atomicio_server_shutdown(atomicio_server_ctx* server_ctx);
+
+/**
+ * Takes the address of a server_ctx pointer
+ * Destroys server context resources (Pthread attribute, mutex, etc), and deallocates associated memory.
+ * The server context is no longer valid after a successful call to atomicio_destroy and is set to null.
+ */ 
+int atomicio_server_destroy(atomicio_server_ctx** server_ctx_ptr);
 
 
 // ========================================================
@@ -47,27 +61,33 @@ int atomicio_shutdown(void);
 /**
  * Returns the current server state (running / not running)
  */
-bool atomicio_is_running(void);
+bool atomicio_is_running(atomicio_server_ctx* server_ctx);
 
 /**
  * Atomically loads and returns a snapshot count of currently connected clients.
  */
-int atomicio_get_active_user_count(void);
+int atomicio_get_active_user_count(atomicio_server_ctx* server_ctx);
 
 /**
- * Returns total active server lifetime in milliseconds since calling atomicio_run().
+ * Returns total server object lifetime in milliseconds since calling atomicio_create_server().
  */
-uint64_t atomicio_get_uptime_ms(void);
+int64_t atomicio_get_overall_uptime_ms(atomicio_server_ctx* server_ctx);
+
+/**
+ * Returns the server's current active session uptime in milliseconds
+ * Returns 0 if the server is OFFLINE
+ */ 
+int64_t atomicio_get_session_uptime_ms(atomicio_server_ctx* server_ctx);
 
 /**
  * Computes and returns the average relative latency of all connected clients.
  */ 
-float atomicio_get_avg_latency_multiplier(void);
+float atomicio_get_avg_latency_multiplier(atomicio_server_ctx* server_ctx);
 
 /**
  * Returns tracking metric for dropped packets under high load conditions.
  */ 
-uint64_t atomicio_get_dropped_packets_count(void);
+int64_t atomicio_get_dropped_packets_count(atomicio_server_ctx* server_ctx);
 
 
 // ========================================================
