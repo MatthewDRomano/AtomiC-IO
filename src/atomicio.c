@@ -84,6 +84,7 @@ struct atomicio_server_ctx {
 	pthread_mutex_t clients_mutex;			// Used to avoid races that stem from editing linked list structure
 	pthread_attr_t client_attr;			// Used for limiting thread stack size
 	sem_t* clients_cleanup_sem;			// Used to signal reaper thread to cleanup client resources
+	char sem_name[MAX_PATH_LEN];
 
 	// Thread IDs
 	pthread_t reaper_tid;
@@ -495,7 +496,7 @@ static void atomicio_config_init(atomicio_server_ctx* server_ctx) {
         server_ctx->clients_cleanup_sem = NULL;
 
 	// Set clean slate network fields
-	server_ctx->settings = (settings_t){0};
+	memset(&server_ctx->settings.server, 0, sizeof(server_ctx->settings.server));
 	server_ctx->settings.socket_fd = -1;
 	
 	// Clear runtime metrics
@@ -552,32 +553,38 @@ atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settin
 	snprintf(new_server_ctx->settings.log_path, MAX_PATH_LEN, "%s", init_settings->log_path); // MAX_PATH_LEN defined in log.h
 	
 	// Creates stack size attribute for client threads --> stack + TLS (256KB)
-        pthread_attr_init(&new_server_ctx->client_attr);
-        if (pthread_attr_setstacksize(&new_server_ctx->client_attr, CLIENT_STACK_SIZE) != 0) {
-                fprintf(stderr, "Error setting client thread stack size\n");
-                goto err_free_server_mem;
+        int rc = pthread_attr_init(&new_server_ctx->client_attr);
+	if (rc != 0) {
+		fprintf(stderr, "Error initializing pthread attribute: %d\n", rc);
+		goto err_free_server_mem;
+	}
+	
+	rc = pthread_attr_setstacksize(&new_server_ctx->client_attr, CLIENT_STACK_SIZE);
+        if (rc != 0) {
+                fprintf(stderr, "Error setting client thread stack size: %d\n", rc);
+                goto err_destroy_thread_attr;
         }
 
 	// Initialize the clients linked list mutex
-	pthread_mutex_init(&new_server_ctx->clients_mutex, NULL);
+	rc = pthread_mutex_init(&new_server_ctx->clients_mutex, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "Error initializing pthread_mutex: %d\n", rc);
+		goto err_destroy_thread_attr;
+	}
 	
 
 
         // Creates semaphore w/ owner read / write, otherwise read only
-        char sem_name[MAX_PATH_LEN];
 	unsigned long long unique_sem_id = atomic_fetch_add(&sem_counter, 1ull);
-	snprintf(sem_name, MAX_PATH_LEN, "/clients_cleanup_sem_%llu", unique_sem_id);
+	snprintf(new_server_ctx->sem_name, MAX_PATH_LEN, "/reaper_sem%llu", unique_sem_id); // MacOs and Linux differ in Posix named semaphore name lengths. (Some MacOs versions allow 31 chars max)
         
-	new_server_ctx->clients_cleanup_sem = sem_open(sem_name, O_CREAT, 0644, 0);
+	new_server_ctx->clients_cleanup_sem = sem_open(new_server_ctx->sem_name, O_CREAT, 0644, 0);
         if (new_server_ctx->clients_cleanup_sem == SEM_FAILED) {
                 perror("Failed to create client cleanup semaphore");
 		// Do not subtract sem_count, just burn the id value
-                goto err_destroy_thread_attr;
+                goto err_destroy_mutex;
         }
 
-        // Unlinks named semaphore from kernel and adds to static global counter
-        // Semaphore now persists for server lifetime instead of in kernel indefinitely
-        sem_unlink(sem_name);
 
         // Error opening error log; treated as catastrophic
         if (init_log(new_server_ctx->settings.log_path) != 0)
@@ -599,8 +606,13 @@ atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settin
 
 	// Closes semaphore
 	err_close_sem:
+	// Unlinks named semaphore from kernel
+	sem_unlink(new_server_ctx->sem_name); 		// NEED TO ADD SEM_NAME TO CONTEXT AND UNLINK WHENEVER DESTROY
 	sem_close(new_server_ctx->clients_cleanup_sem);
 	
+	err_destroy_mutex:
+	pthread_mutex_destroy(&new_server_ctx->clients_mutex);
+
 	err_destroy_thread_attr:
 	pthread_attr_destroy(&new_server_ctx->client_attr);
 
@@ -648,6 +660,13 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
         int opt = 1;
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+	// Required for macOS quick server restarts on wildcard address (INADDR_ANY a.k.a 0.0.0.0)
+	// MacOS vs Linux posix implementation 
+	#ifdef SO_REUSEPORT
+	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+	#endif
+
+
         // Binds server to socket w/ above socket config
         while (bind(listen_fd, (struct sockaddr*)(&server_ctx->settings.server), sizeof(server_ctx->settings.server)) == -1) {
                 if (errno == EINTR)
@@ -687,7 +706,7 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
 	
 
 	// Successfully begins run
-	atomic_store(&server_ctx->metadata.server_start_timestamp, now_ms());
+	atomic_store(&server_ctx->metadata.server_run_epoch, now_ms());
 	return 0;
 
 
@@ -808,6 +827,9 @@ int atomicio_server_destroy(atomicio_server_ctx** server_ctx_ptr) {
 	// Destroy server context internal data
 	pthread_mutex_destroy(&server_ctx->clients_mutex);
 	pthread_attr_destroy(&server_ctx->client_attr);
+	
+	// Unlinks named semaphore from kernel and closes it
+	sem_unlink(server_ctx->sem_name);
 	sem_close(server_ctx->clients_cleanup_sem);
 	
 	// Close log instance

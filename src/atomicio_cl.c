@@ -97,14 +97,23 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 	new_client_ctx->token = ATOMICIO_CL_MAGIC_COOKIE;
 
 	// Zero-set network fields
-        new_client_ctx->network.server = (struct sockaddr_in){0};
+        memset(&new_client_ctx->network.server, 0, sizeof(new_client_ctx->network.server));
         new_client_ctx->network.socket_fd = -1;
 
 	// Zero-set local/broadcast client packet(s) and init respective mutexes
 	memset(&new_client_ctx->my_client, 0, sizeof(packet_t));
 	memset(new_client_ctx->all_clients_broadcast, 0, sizeof(packet_t) * MAX_CONNECTIONS);
-	pthread_mutex_init(&new_client_ctx->my_client_mutex, NULL);
-	pthread_mutex_init(&new_client_ctx->all_clients_broadcast_mutex, NULL);
+	int rc = pthread_mutex_init(&new_client_ctx->my_client_mutex, NULL);
+	if (rc != 0) {
+		fprintf(stderr, "Error initializing local client mutex: %d\n", rc);
+		goto err_free_client_mem;
+	}
+
+	rc = pthread_mutex_init(&new_client_ctx->all_clients_broadcast_mutex, NULL);
+	if (rc != 0) {
+                fprintf(stderr, "Error initializing broadcast clients mutex: %d\n", rc);
+                goto err_destroy_client_mutex;
+        }
 
 	// Set specified client fields -> uuid and log_path
 	// Bound constants defined in at_net.h / log.h respectively
@@ -113,14 +122,26 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 	
 	// Init client metadata
 	atomic_init(&new_client_ctx->active_user_count, 0);
-	new_client_ctx->metadata = (telemetry_t){0};
+	atomic_init(&new_client_ctx->metadata.bytes_sent, 0);
+	atomic_init(&new_client_ctx->metadata.bytes_received, 0);
 	atomic_init(&new_client_ctx->metadata.init_epoch, now_ms());
 	atomic_init(&new_client_ctx->metadata.connection_epoch, 0);
 
 	// Client is now fully initialized and address is returned
 	atomic_init(&new_client_ctx->state, STATE_DISCONNECTED);
 	return new_client_ctx;
-	
+
+
+
+	// Error initializing broadcast clients mutex. Destroy local client mutex and cascade
+	err_destroy_client_mutex:
+	pthread_mutex_destroy(&new_client_ctx->my_client_mutex);
+
+	// Error initializing local client mutex. Free allocated client context and return NULL
+	err_free_client_mem:
+	free(new_client_ctx_;
+
+	return NULL;
 }
 
 int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ipv4_domain) {
