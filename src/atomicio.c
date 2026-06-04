@@ -425,6 +425,13 @@ static void* client_accept_thread(void* arg) {
                         continue;
                 }
 
+
+		// On older macOS systems, setting SO_NOSIGPIPE flag is needed to ensure sigpipe is not raised on write errors due to disrupted connection
+		int opt = 1;
+		#ifdef SO_NOSIGPIPE
+		setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+		#endif		
+
                 // Create new client once accepted
                 client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
                 if (!ct) {

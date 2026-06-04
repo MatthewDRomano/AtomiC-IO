@@ -92,8 +92,8 @@ int full_write(int socket_fd, packet_t* packet_buffer, int packet_count) {
 		size_t n = PACKET_HEADER_SIZE + plength;
                 size_t bytes_written = 0;
                 while (bytes_written < n) {
-
-                        result = write(socket_fd, (char*)current_packet + bytes_written, n - bytes_written);
+			// send flag: MSG_NOSIGNAL ensures sigpipe is not sent upon broken connection. Proper atomicio shutdown path takes place
+                        result = send(socket_fd, (char*)current_packet + bytes_written, n - bytes_written, MSG_NOSIGNAL);
 
                         // Error while writing
                         if (result < 0) {
