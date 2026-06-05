@@ -37,7 +37,7 @@ typedef enum {
 } client_state_t;
 
 typedef struct {
-        struct sockaddr_in server;
+        struct sockaddr server;
         int socket_fd;
 
 } network_t;
@@ -139,12 +139,76 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 
 	// Error initializing local client mutex. Free allocated client context and return NULL
 	err_free_client_mem:
-	free(new_client_ctx_;
+	free(new_client_ctx);
 
 	return NULL;
 }
 
-int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ipv4_domain) {
+static int atomicio_connect_to_host(atomicio_cl_t* client_ctx, const char* ipv4_domain, const char* port_str) {
+	struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM }; 	// IPv4 & TCP
+	struct addrinfo *result;
+
+	// Resolve host into result
+	int rc = getaddrinfo(ipv4_domain, port_str, &hints, &result);
+	if (rc != 0) {
+		fprintf(stderr, "%s\n", gai_strerror(rc));
+		return -1;
+	}
+
+
+	// Iterate through returned hosts
+	int fd = -1;
+	struct addrinfo* current = result;	
+	for (; current != NULL; current = current->ai_next) {
+		fd = socket(current->ai_family, current->ai_socktype, current->ai_protocol); // Make new socket as linux socket state machine renders socket unusable w/ failed connection
+		if (fd == -1) {
+                	perror("Client socket creation failed");
+                	continue;
+        	}	
+
+		// Ensures sigpipe is disallowed on older macOS systems
+        	#ifdef SO_NOSIGPIPE
+        	int opt = 1;
+        	setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
+        	#endif
+		
+		// Attempt connection
+		bool connect_failed = false;
+		while (connect(fd, current->ai_addr, current->ai_addrlen) == -1) {
+                	if (errno == EINTR) // Interrupted by signal
+                        	continue;
+
+                	// Fatal error occurred
+                	connect_failed = true;
+			break;
+        	}	
+	
+		// Close fd and continue on connect() failure
+		if (connect_failed) {
+			close(fd);
+			continue;
+		}
+	
+		// Set client context fd / break out of loop upon success
+		else {	
+			client_ctx->network.socket_fd = fd;
+			break;
+		}
+	}
+
+	// Heap allocated
+	freeaddrinfo(result); 
+
+	// Upon no valid host	
+	if (!current)
+		return -1;
+
+	// Valid host / connection
+	return 0;
+
+}
+
+int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const char* ipv4_domain) {
 	
 	// ========================================================
         // Ensures valid conditions to connect client to server
@@ -165,43 +229,14 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ip
 	if (atomic_load(&client_ctx->state) == STATE_AWAITING_CLEANUP)
 		atomicio_cl_disconnect(client_ctx);
 
-	// Sets Domain / IPv4 if valid
-  	struct hostent* h_ent = gethostbyname(ipv4_domain);
-	if (h_ent == NULL) {
-		fprintf(stderr, "Invalid IPv4 / Domain\n");
-		return -1;
-	}
-	
-	// Sets: Port -> IP type -> desired host IP
-	client_ctx->network.server.sin_port = htons(port);		
-	client_ctx->network.server.sin_family = AF_INET;
-	memcpy(&client_ctx->network.server.sin_addr, h_ent->h_addr_list[0], h_ent->h_length);
-
-	// Zero out the server padding array
-	memset(client_ctx->network.server.sin_zero, 0, sizeof(client_ctx->network.server.sin_zero));
 
 	// ========================================================
         // Establish connection to server
         // ========================================================	
 
-	// Create socket
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd == -1) { // Frees client memory upon error
-                perror("Client socket creation failed");
-                return -1;
-        }
-        client_ctx->network.socket_fd = fd;
-
-	// Connects socket to server
-	struct sockaddr* server_st = (struct sockaddr*)(&client_ctx->network.server);
-        while (connect(client_ctx->network.socket_fd, server_st, sizeof(*server_st)) == -1) {
-                if (errno == EINTR)
-                        continue;
-
-                // Error occurred or shutdown requested
-                perror("Failed to connect socket to server");
-                goto err_close_fd;
-        }
+	client_ctx->network.socket_fd = -1;
+	if (atomicio_connect_to_host(client_ctx, ipv4_domain, port_str) != 0)
+		goto err_close_fd;	
 
 	// Connection successful
         atomic_store(&client_ctx->state, STATE_CONNECTED);

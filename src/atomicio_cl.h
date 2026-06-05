@@ -28,7 +28,7 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path);
  * The aforementioned receive thread is spawned to update local client data.
  * Call this method after successfully creating a client object.
  */
-int atomicio_cl_connect(atomicio_cl_t* client_ctx, uint16_t port, const char* ipv4_domain);
+int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port, const char* ipv4_domain);
 
 
 /**

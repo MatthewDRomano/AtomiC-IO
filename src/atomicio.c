@@ -107,20 +107,6 @@ struct atomicio_server_ctx {
 
 
 
-// Checks for finished clients to remove
-static bool has_dead_clients(atomicio_server_ctx* server_ctx) {
-	// Grabs a snapshot of the current list (
-	// Asides from adding a new head, the list cannot be changed during loop as this method halts reaper
-	client_thread_t* ct = atomic_load(&server_ctx->clients);
-	while (ct != NULL) {
-		if (atomic_load(&ct->finished)) 
-			return true;
-
-		ct = (client_thread_t*)atomic_load(&ct->next);
-	}
-	
-	return false;
-}
 
 
 // Signals socket connection shutdown / frees allocated client memory
@@ -148,11 +134,10 @@ static void* reaper_thread(void* arg) {
 	int final_sweep_flag = 1;
 	while(atomic_load(&server_ctx->state) == STATE_ONLINE || final_sweep_flag-- == 1) {
 	
-		// Ignores spurious wake ups while the server is running
-		// Thread waits until a client is marked as finished, or server is shutting down	
-		while (atomic_load(&server_ctx->state) == STATE_ONLINE && !has_dead_clients(server_ctx)) {
+		// Upon spurious wakeups, reaper thread safely falls through the below iteration loop back to sem_wait.
+		// Thread waits until sem is posted (client marked finished)
+		if (atomic_load(&server_ctx->state) == STATE_ONLINE)
 			sem_wait(server_ctx->clients_cleanup_sem);
-		}
 
 		// At this point a final sweep is already occurring
 		if (atomic_load(&server_ctx->state) == STATE_OFFLINE) {
@@ -208,12 +193,8 @@ static void* reaper_thread(void* arg) {
 	return NULL;
 }
 
-// Assumes clients mutex unlocked
-static int send_by_type(atomicio_server_ctx* server_ctx, int sock_fd, message_type_t msg_type) {
-	// C11 standard keyword to allocate this array once PER THREAD
-	// This array resides in TLS segment of virtual memory 
-	// And is in the same allocated block as stack when calling pthread_create() so consider this with pthread_attr
-	static _Thread_local packet_t all_client_packets[MAX_CONNECTIONS];
+// Copies all client data into broadcast_buffer (heap allocated buffer with MAX_CONNECTIONS amount of packet_t's)
+static int send_by_type(atomicio_server_ctx* server_ctx, packet_t* broadcast_buffer, int sock_fd, message_type_t msg_type) {
 	const size_t n = sizeof(packet_t);
 	int i = 0;
 
@@ -224,11 +205,11 @@ static int send_by_type(atomicio_server_ctx* server_ctx, int sock_fd, message_ty
 	uint16_t net_type = htons((uint16_t)msg_type);
 	uint16_t net_act_usrs = htons((uint16_t)active_users);
 	while (c != NULL && i < active_users && i < MAX_CONNECTIONS) {
-		memcpy(all_client_packets + i, &c->data_packet, n);
+		memcpy(broadcast_buffer + i, &c->data_packet, n);
 
 		// Maintains protocol usage consistent across all packets
-		all_client_packets[i].type = net_type;
-        	all_client_packets[i].active_users = net_act_usrs;
+		broadcast_buffer[i].type = net_type;
+        	broadcast_buffer[i].active_users = net_act_usrs;
 
 		i++;
 		c = (client_thread_t*)atomic_load(&c->next);
@@ -236,7 +217,7 @@ static int send_by_type(atomicio_server_ctx* server_ctx, int sock_fd, message_ty
 	pthread_mutex_unlock(&server_ctx->clients_mutex);
 
 	// Sends all 'i' clients' data processed above	
-	return full_write(sock_fd, all_client_packets, i);
+	return full_write(sock_fd, broadcast_buffer, i);
 }
 
 // Returns current ms
@@ -252,8 +233,17 @@ static uint64_t now_ms() {
 
 // Performs IO with client
 static void* client_io_thread(void* args) {	
+
+	// Put thread args into local variables (args format defined in static struct)
 	atomicio_server_ctx* server_ctx = ((cthread_args_t*)args)->server_ctx;
 	client_thread_t* ct = ((cthread_args_t*)args)->ct;
+
+	// Allows for the send_by_type() write buffer to be on the heap instead of TLS
+	packet_t* broadcast_buffer = (packet_t*)malloc(sizeof(packet_t) * MAX_CONNECTIONS);
+	if (!broadcast_buffer) {
+		errlog("Client", "malloc", ct->client_fd, errno, "N/A", "N/A"); // Not worried about race. ct->client_fd is effectively read only
+		goto err_kill_client;
+	}
 
 	struct pollfd pfd;
 
@@ -288,7 +278,6 @@ static void* client_io_thread(void* args) {
 		if (ret < 0)
                         if (errno != EINTR) {
                                 errlog("Client", "poll", io_fd, errno, "N/A", inbound_packet.client_uuid);
-                                atomic_store(&ct->finished, true);
                                 break;
                         }
 
@@ -296,7 +285,6 @@ static void* client_io_thread(void* args) {
 			// Socket err	
 			if (pfd.revents & (POLLHUP | POLLERR)) {
 				//send_by_type(io_fd, LOGOUT); // socket broken
-				atomic_store(&ct->finished, true);
 				break;
                         }
 			
@@ -309,7 +297,6 @@ static void* client_io_thread(void* args) {
 					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
 					msglog(dc_msg);	
 					
-					atomic_store(&ct->finished, true);
 					break;
 				}
 				
@@ -318,6 +305,7 @@ static void* client_io_thread(void* args) {
 				pthread_mutex_unlock(&server_ctx->clients_mutex);
 				
 
+				bool should_disconnect = false;
 				switch ((message_type_t)ntohs(inbound_packet.type)) {
 					case LOGIN:
 						char connect_msg[MAX_MSG_LEN];
@@ -326,11 +314,16 @@ static void* client_io_thread(void* args) {
 						break;
 					case UPDATE_MESSAGE:
 						break;
-					// LOGOUT and invalid types are logged but disregarded	
+					// Invalid types are logged and treated as catastrophic
 					default:
 						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", inbound_packet.client_uuid);
+						should_disconnect = true;
 						break;
 				}	
+				
+				// Disconnects / shutdowns client if invalid packet type is detected
+				if (should_disconnect)
+					break; 
 			}
 		
 		}
@@ -363,19 +356,26 @@ static void* client_io_thread(void* args) {
 			// Send packet to client	
 			last_send_time = now;
 			int result;
-                        if ((result = send_by_type(server_ctx, io_fd, UPDATE_MESSAGE)) != 0) {
+                        if ((result = send_by_type(server_ctx, broadcast_buffer, io_fd, UPDATE_MESSAGE)) != 0) {
                         	char dc_msg[MAX_MSG_LEN];
                                 snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
                                 msglog(dc_msg); 
-				atomic_store(&ct->finished, true);
                                 break;
                         }
 		}
 	}
-	
+
+
+	// Clean up client IO resources
+	free(broadcast_buffer);
 	close(io_fd);
+
+	// Goto symbol for if broadcast buffer allocation fails --> Kills client before any IO occurs
+	err_kill_client:
+	atomic_store(&ct->finished, true);
+
+	free(args);	
 	sem_post(server_ctx->clients_cleanup_sem);
-	free(args);
 
 	return NULL;
 }
