@@ -391,7 +391,8 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
         memcpy(&packet_out, &client_ctx->my_client, sizeof(packet_t));
         pthread_mutex_unlock(&client_ctx->my_client_mutex);
 
-	// Sets outgoing packet header info (type, payload len)
+	// Sets outgoing packet header info (authenticator token, type, payload len)
+	packet_out.token = htonl(ATOMICIO_PROTOCOL_MAGIC);
 	packet_out.type = htons((uint16_t)msg_type);
         packet_out.active_users = htons(1);
 
@@ -459,6 +460,10 @@ int64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
 
 	// Returns valid lifetime if above check passes	
 	return now_ms() - atomic_load(&client_ctx->metadata.init_epoch);
+}
+
+int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, ) {
+
 }
 
 

@@ -3,17 +3,24 @@
 
 #include <stdint.h>	// uint8_t, uint16_t
 
+
+
+// Packet struct / connection specifiers
 #define MAX_CONNECTIONS 128
-#define PACKET_HEADER_SIZE 38 // uuid, type, payload_len
-#define PAYLOAD_MAX (1024 - PACKET_HEADER_SIZE) // 986 1KB total
+#define PACKET_HEADER_SIZE 42 // uuid, type, payload_len
+#define PAYLOAD_MAX (1024 - PACKET_HEADER_SIZE) // 982 1KB total
 #define CLIENT_USERNAME_SIZE 32
 
+// Magic cookie used to verify user packets
+#define ATOMICIO_PROTOCOL_MAGIC 0x61746F6D			// "atom" in hex
+
+// Atomicio IO internal errors
 #define ERR_PAYLOAD_OOB -2
 #define ERR_USERS_OOB -3
 
-// Bounded Server->Client data transfer rate (every __ ms)
-#define NETWORK_TRANSFER_PERIOD 25
-#define PACKET_DROP_THRESHOLD (NETWORK_TRANSFER_PERIOD * 2)
+// Network time protocols
+#define NETWORK_TRANSFER_PERIOD 25				// Bounded Server->Client data transfer rate (every __ ms)
+#define PACKET_DROP_THRESHOLD (NETWORK_TRANSFER_PERIOD * 2)     // Threshold to drop packets if specified by user (server side)
 
 
 /**
@@ -30,6 +37,7 @@ typedef enum {
  *  htons / htonl needed for fields accordingly
  */  
 typedef struct __attribute__((packed)) {
+	uint32_t token;					//    4 bytes 
 	char client_uuid[CLIENT_USERNAME_SIZE];		//   32 bytes
 	uint16_t type;					//    2 bytes
 	uint16_t active_users;				//    2 bytes / functionally identical to total packets sent

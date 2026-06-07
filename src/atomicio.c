@@ -199,22 +199,23 @@ static int send_by_type(atomicio_server_ctx* server_ctx, packet_t* broadcast_buf
 	int i = 0;
 
 	pthread_mutex_lock(&server_ctx->clients_mutex);
-	int active_users = atomic_load(&server_ctx->connected_users);
 	client_thread_t* c = (client_thread_t*)atomic_load(&server_ctx->clients);
 
 	uint16_t net_type = htons((uint16_t)msg_type);
-	uint16_t net_act_usrs = htons((uint16_t)active_users);
-	while (c != NULL && i < active_users && i < MAX_CONNECTIONS) {
+	while (c != NULL && i < MAX_CONNECTIONS) {
 		memcpy(broadcast_buffer + i, &c->data_packet, n);
 
-		// Maintains protocol usage consistent across all packets
 		broadcast_buffer[i].type = net_type;
-        	broadcast_buffer[i].active_users = net_act_usrs;
 
 		i++;
 		c = (client_thread_t*)atomic_load(&c->next);
 	}
 	pthread_mutex_unlock(&server_ctx->clients_mutex);
+
+	// Set user (packet) count after confirming EXACTLY how many packets are being sent
+	uint16_t net_act_usrs = htons((uint16_t)i);
+	for (int j = 0; j < i; j++)
+		broadcast_buffer[j].active_users = net_act_usrs;
 
 	// Sends all 'i' clients' data processed above	
 	return full_write(sock_fd, broadcast_buffer, i);
@@ -290,8 +291,9 @@ static void* client_io_thread(void* args) {
 			
 			// Reads from client	
 			if (pfd.revents & POLLIN) {
-				int result = 0;
+				
 				// Full read ensures number of packets read is between 1 and MAX_CONNECTIONS. (Guaranteed to be 1 here from client)
+				int result = 0;
 				if ((result = full_read(io_fd, &inbound_packet)) != 0) {
 					char dc_msg[MAX_MSG_LEN];
 					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
@@ -300,11 +302,15 @@ static void* client_io_thread(void* args) {
 					break;
 				}
 				
-				pthread_mutex_lock(&server_ctx->clients_mutex);
-				memcpy(&ct->data_packet, &inbound_packet, sizeof(packet_t));
-				pthread_mutex_unlock(&server_ctx->clients_mutex);
-				
 
+				// Checks if the packet's token is equal to AtomiC-IO's protocol magic number
+				if (ntohl(inbound_packet.token) != ATOMICIO_PROTOCOL_MAGIC) {
+					errlog("Recv", "packet auth", io_fd, -1, "Inv auth token", inbound_packet.client_uuid);
+					break;			
+				}
+
+
+				// Parses / Handles different packet types
 				bool should_disconnect = false;
 				switch ((message_type_t)ntohs(inbound_packet.type)) {
 					case LOGIN:
@@ -324,6 +330,12 @@ static void* client_io_thread(void* args) {
 				// Disconnects / shutdowns client if invalid packet type is detected
 				if (should_disconnect)
 					break; 
+
+				
+				// Copy inbound packet data to individual client struct
+				pthread_mutex_lock(&server_ctx->clients_mutex);
+                                memcpy(&ct->data_packet, &inbound_packet, sizeof(packet_t));
+                                pthread_mutex_unlock(&server_ctx->clients_mutex);
 			}
 		
 		}
