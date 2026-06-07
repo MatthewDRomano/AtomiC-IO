@@ -109,3 +109,12 @@ int full_write(int socket_fd, packet_t* packet_buffer, int packet_count) {
 
         return 0;
 }
+
+
+uint64_t htonll(uint64_t ui64) {
+	return htonl((uint32_t)(ui64 >> 32)) | ((uint64_t)htonl((uint32_t)ui64) << 32);
+}
+
+uint64_t ntohll(uint64_t ui64) {
+	return ntohl((uint32_t)(ui64 >> 32)) | ((uint64_t)ntohl((uint32_t)ui64) << 32);
+}

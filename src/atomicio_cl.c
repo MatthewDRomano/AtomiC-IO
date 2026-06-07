@@ -462,9 +462,9 @@ int64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
 	return now_ms() - atomic_load(&client_ctx->metadata.init_epoch);
 }
 
-int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, ) {
+//int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, ) {
 
-}
+//}
 
 
 

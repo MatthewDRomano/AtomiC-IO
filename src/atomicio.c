@@ -105,8 +105,15 @@ struct atomicio_server_ctx {
 
 
 
+// Returns current ms
+static uint64_t now_ms() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
 
-
+        // Sec / ns conversion
+        return (uint64_t)ts.tv_sec * 1000
+                + ts.tv_nsec / 1000000;
+}
 
 
 // Signals socket connection shutdown / frees allocated client memory
@@ -213,22 +220,16 @@ static int send_by_type(atomicio_server_ctx* server_ctx, packet_t* broadcast_buf
 	pthread_mutex_unlock(&server_ctx->clients_mutex);
 
 	// Set user (packet) count after confirming EXACTLY how many packets are being sent
+	// Also set timestamp with atomicio custom htonll enduan conversion (defined in at_net.h)
 	uint16_t net_act_usrs = htons((uint16_t)i);
-	for (int j = 0; j < i; j++)
+	uint64_t net_timestamp = htonll(now_ms());
+	for (int j = 0; j < i; j++) {
 		broadcast_buffer[j].active_users = net_act_usrs;
-
+		broadcast_buffer[j].timestamp = net_timestamp;
+	}
+	
 	// Sends all 'i' clients' data processed above	
 	return full_write(sock_fd, broadcast_buffer, i);
-}
-
-// Returns current ms
-static uint64_t now_ms() {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-		
-	// Sec / ns conversion
-	return (uint64_t)ts.tv_sec * 1000
-		+ ts.tv_nsec / 1000000;
 }
 
 

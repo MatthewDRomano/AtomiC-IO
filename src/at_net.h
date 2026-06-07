@@ -7,8 +7,8 @@
 
 // Packet struct / connection specifiers
 #define MAX_CONNECTIONS 128
-#define PACKET_HEADER_SIZE 42 // uuid, type, payload_len
-#define PAYLOAD_MAX (1024 - PACKET_HEADER_SIZE) // 982 1KB total
+#define PACKET_HEADER_SIZE 50 // uuid, type, payload_len
+#define PAYLOAD_MAX (1024 - PACKET_HEADER_SIZE) // 974 1KB total
 #define CLIENT_USERNAME_SIZE 32
 
 // Magic cookie used to verify user packets
@@ -38,6 +38,7 @@ typedef enum {
  */  
 typedef struct __attribute__((packed)) {
 	uint32_t token;					//    4 bytes 
+	uint64_t timestamp;				//    8 bytes
 	char client_uuid[CLIENT_USERNAME_SIZE];		//   32 bytes
 	uint16_t type;					//    2 bytes
 	uint16_t active_users;				//    2 bytes / functionally identical to total packets sent
@@ -50,5 +51,10 @@ typedef struct __attribute__((packed)) {
  */ 
 int full_read(int socket_fd, packet_t* packet_buffer);
 int full_write(int socket_fd, packet_t* packet_buffer, int users);
+
+
+// Custom network <--> host endian conversion methods
+uint64_t htonll(uint64_t ui64);
+uint64_t ntohll(uint64_t ui64);
 
 #endif
