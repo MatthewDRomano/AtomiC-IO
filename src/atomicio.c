@@ -260,8 +260,8 @@ static void* client_io_thread(void* args) {
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
 	
-	// Temp inbound_packet to read client data into. Later mutex memcpy into ct->data_packet
-	packet_t inbound_packet = {0};
+	// Temp rx_pkt_buf to read client data into. Later mutex memcpy into ct->data_packet
+	packet_t rx_pkt_buf = {0};
 	while (!atomic_load(&ct->finished)) {
 		pfd.fd = io_fd;
         	pfd.events = POLLIN;
@@ -279,7 +279,7 @@ static void* client_io_thread(void* args) {
 		// Error during poll()
 		if (ret < 0)
                         if (errno != EINTR) {
-                                errlog("Client", "poll", io_fd, errno, "N/A", inbound_packet.client_uuid);
+                                errlog("Client", "poll", io_fd, errno, "N/A", rx_pkt_buf.client_uuid);
                                 break;
                         }
 
@@ -295,9 +295,9 @@ static void* client_io_thread(void* args) {
 				
 				// Full read ensures number of packets read is between 1 and MAX_CONNECTIONS. (Guaranteed to be 1 here from client)
 				int result = 0;
-				if ((result = full_read(io_fd, &inbound_packet)) != 0) {
+				if ((result = full_read(io_fd, &rx_pkt_buf)) != 0) {
 					char dc_msg[MAX_MSG_LEN];
-					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
+					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", rx_pkt_buf.client_uuid);
 					msglog(dc_msg);	
 					
 					break;
@@ -305,25 +305,25 @@ static void* client_io_thread(void* args) {
 				
 
 				// Checks if the packet's token is equal to AtomiC-IO's protocol magic number
-				if (ntohl(inbound_packet.token) != ATOMICIO_PROTOCOL_MAGIC) {
-					errlog("Recv", "packet auth", io_fd, -1, "Inv auth token", inbound_packet.client_uuid);
+				if (ntohl(rx_pkt_buf.token) != ATOMICIO_PROTOCOL_MAGIC) {
+					errlog("Recv", "packet auth", io_fd, -1, "Inv auth token", rx_pkt_buf.client_uuid);
 					break;			
 				}
 
 
 				// Parses / Handles different packet types
 				bool should_disconnect = false;
-				switch ((message_type_t)ntohs(inbound_packet.type)) {
+				switch ((message_type_t)ntohs(rx_pkt_buf.type)) {
 					case LOGIN:
 						char connect_msg[MAX_MSG_LEN];
-                                        	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", inbound_packet.client_uuid);
+                                        	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", rx_pkt_buf.client_uuid);
                                         	msglog(connect_msg);
 						break;
 					case UPDATE_MESSAGE:
 						break;
 					// Invalid types are logged and treated as catastrophic
 					default:
-						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", inbound_packet.client_uuid);
+						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", rx_pkt_buf.client_uuid);
 						should_disconnect = true;
 						break;
 				}	
@@ -335,7 +335,7 @@ static void* client_io_thread(void* args) {
 				
 				// Copy inbound packet data to individual client struct
 				pthread_mutex_lock(&server_ctx->clients_mutex);
-                                memcpy(&ct->data_packet, &inbound_packet, sizeof(packet_t));
+                                memcpy(&ct->data_packet, &rx_pkt_buf, sizeof(packet_t));
                                 pthread_mutex_unlock(&server_ctx->clients_mutex);
 			}
 		
@@ -355,7 +355,7 @@ static void* client_io_thread(void* args) {
 				// Determine status tag based on policy
 				const char* status = (server_ctx->settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
 				char msg[MAX_MSG_LEN];
-				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", inbound_packet.client_uuid, latency_ratio, status);
+				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", rx_pkt_buf.client_uuid, latency_ratio, status);
 				msglog(msg);
 			}
 			
@@ -371,7 +371,7 @@ static void* client_io_thread(void* args) {
 			int result;
                         if ((result = send_by_type(server_ctx, broadcast_buffer, io_fd, UPDATE_MESSAGE)) != 0) {
                         	char dc_msg[MAX_MSG_LEN];
-                                snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", inbound_packet.client_uuid);
+                                snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", rx_pkt_buf.client_uuid);
                                 msglog(dc_msg); 
                                 break;
                         }

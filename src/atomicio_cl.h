@@ -5,10 +5,24 @@
 #include <stdbool.h>
 #include "at_net.h"
 
-// 1. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
+// 0. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
 // 	|-> Stores client data internally and encapsulates internal structure
 typedef struct atomicio_client_ctx atomicio_cl_t;
 
+// 1. Struct that holds relevant client data
+typedef struct {
+	char uuid[CLIENT_USERNAME_SIZE];	
+	uint16_t payload_len;
+	char payload[PAYLOAD_MAX];
+} client_data_snapshot_t;
+
+// Holds array of client data snapshots and active user count
+// An instance of broadcast_view_t (held by the API user) can be populated by atomicio_cl_get_broadcast_data()
+typedef struct {
+	uint16_t count;
+	uint64_t timestamp;
+	client_data_snapshot_t snapshots[MAX_CONNECTIONS];
+} broadcast_view_t;
 
 // ========================================================
 // 2. LIFECYCLE CONTROLLERS
@@ -57,7 +71,7 @@ int atomicio_cl_destroy(atomicio_cl_t** client_ctx_ptr);
  *
  * See at_net.h for packet (client data) sizing protocol
  */ 
-int atomicio_cl_data_update(atomicio_cl_t* client_ctx, const void* data, uint16_t data_size);
+int atomicio_cl_update_data(atomicio_cl_t* client_ctx, const void* data, uint16_t data_size);
 
 
 /**
@@ -75,6 +89,15 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type);
  * Returns true if connected, false if disconnected or uninitialized
  */
 bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx);
+
+
+/**
+ * Takes valid client context and broadcast view pointers. 
+ * Populates 'view' with a snapshot of the current broadcast data of all active clients
+ *
+ * Returns 0 upon success, -1 if invalid args
+ */ 
+int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, broadcast_view_t* view);
 
 
 /**

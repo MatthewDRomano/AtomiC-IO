@@ -52,10 +52,11 @@ typedef struct {
 
 
 struct atomicio_client_ctx {
-	uint64_t token; 	// Used to ensure an atomicio_client_ctx (atomicio_cl_t*) is what's passed into methods
+	uint64_t token; 					// Used to ensure an atomicio_client_ctx (atomicio_cl_t*) is what's passed into methods
 
-	packet_t my_client;
- 	packet_t all_clients_broadcast[MAX_CONNECTIONS];
+	packet_t my_client;					// Intenral packet struct holding local client data
+ 	packet_t all_clients_broadcast[MAX_CONNECTIONS];	// Internal packet struct holding all broadcast client data
+	broadcast_view_t broadcast_data;	 		// Struct that holds relevant broadcast data accessible by the user
 	pthread_mutex_t my_client_mutex;
 	pthread_mutex_t all_clients_broadcast_mutex;
 
@@ -102,6 +103,7 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
 
 	// Zero-set local/broadcast client packet(s) and init respective mutexes
 	memset(&new_client_ctx->my_client, 0, sizeof(packet_t));
+	memset(&new_client_ctx->broadcast_data, 0, sizeof(broadcast_view_t));
 	memset(new_client_ctx->all_clients_broadcast, 0, sizeof(packet_t) * MAX_CONNECTIONS);
 	int rc = pthread_mutex_init(&new_client_ctx->my_client_mutex, NULL);
 	if (rc != 0) {
@@ -409,7 +411,7 @@ int atomicio_cl_send_data(atomicio_cl_t* client_ctx, message_type_t msg_type) {
 }
 
 
-int atomicio_cl_data_update(atomicio_cl_t* client_ctx, const void* data, uint16_t data_size) {
+int atomicio_cl_update_data(atomicio_cl_t* client_ctx, const void* data, uint16_t data_size) {
 	// Ensures object is valid / returning -1 if not
 	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
                 return -1; // Returns -1 on structural API error
@@ -462,9 +464,17 @@ int64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx) {
 	return now_ms() - atomic_load(&client_ctx->metadata.init_epoch);
 }
 
-//int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, ) {
+int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, broadcast_view_t* view) {
+	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error	
 
-//}
+	// Protect read from simultaneous writes to broadcast_data
+	pthread_mutex_lock(&client_ctx->all_clients_broadcast_mutex);
+	*view = client_ctx->broadcast_data;	
+	pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);
+
+	return 0;
+}
 
 
 
@@ -493,14 +503,9 @@ void* recv_thread(void* arg) {
 			internal_connection_teardown(client_ctx);			
 			break;
 		}
-	
-		uint16_t active_users = ntohs(rx_pkt_buf[0].active_users); // Alternatively: rx_pkt_buf->active_users
-		atomic_store(&client_ctx->active_user_count, active_users);
-		
-		pthread_mutex_lock(&client_ctx->all_clients_broadcast_mutex);
-		memcpy(client_ctx->all_clients_broadcast, rx_pkt_buf, sizeof(packet_t) * active_users);
-		pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);	
-		
+
+
+		// Handle message based on type
 		message_type_t type = (message_type_t)ntohs(rx_pkt_buf[0].type);	
 		bool should_exit_loop = false;
 		switch (type) {
@@ -522,8 +527,30 @@ void* recv_thread(void* arg) {
 				break;
 		}
 
+		// Exits if message type error
 		if (should_exit_loop)
 			break;
+
+
+		// Update client context active user field
+		uint16_t active_users = ntohs(rx_pkt_buf[0].active_users); // Alternatively: rx_pkt_buf->active_users
+                atomic_store(&client_ctx->active_user_count, active_users);
+
+		// Load broadcast clients data into local struct --> memcpy to client_ctx struct under mutex to save time
+		broadcast_view_t local_view;
+                for (int i = 0; i < active_users; i++) {
+                        local_view.snapshots[i].payload_len = ntohs(rx_pkt_buf[i].payload_len);
+			memcpy(local_view.snapshots[i].uuid, rx_pkt_buf[i].client_uuid, CLIENT_USERNAME_SIZE);
+                        memcpy(local_view.snapshots[i].payload, rx_pkt_buf[i].payload, rx_pkt_buf[i].payload_len);
+                }
+                local_view.count = active_users;
+		local_view.timestamp = ntohll(rx_pkt_buf[0].timestamp);
+
+		// Copy rx_pkt_buf and local_view data into respective client context fields in thread safe manner
+                pthread_mutex_lock(&client_ctx->all_clients_broadcast_mutex);
+                memcpy(client_ctx->all_clients_broadcast, rx_pkt_buf, sizeof(packet_t) * active_users);
+		client_ctx->broadcast_data = local_view;
+                pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);
 	}	
 
 	// Free allocated temp buffer and return
