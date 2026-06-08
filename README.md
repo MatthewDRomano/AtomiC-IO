@@ -35,7 +35,7 @@ AtomiC-IO solves "Global Lock Contention"—a common bottleneck in traditional b
 
 ### API Preview
 
-The API is designed to be highly readable, enforcing safe lifecycles through "Magic Cookie" token validation to prevent stale pointer manipulation.
+The API is designed to be highly readable, enforcing safe lifecycles through "Magic Cookie" token validation to prevent stale pointer manipulation and internal state tracking to prevent invalid API calls.
 
 ```c
 // 1. Initialize Configuration
