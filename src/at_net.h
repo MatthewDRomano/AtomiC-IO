@@ -54,7 +54,7 @@ int full_write(int socket_fd, packet_t* packet_buffer, int users);
 
 
 // Custom network <--> host endian conversion methods
-uint64_t htonll(uint64_t ui64);
-uint64_t ntohll(uint64_t ui64);
+uint64_t at_htonll(uint64_t ui64);
+uint64_t at_ntohll(uint64_t ui64);
 
 #endif

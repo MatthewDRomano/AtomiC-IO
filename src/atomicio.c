@@ -220,9 +220,9 @@ static int send_by_type(atomicio_server_ctx* server_ctx, packet_t* broadcast_buf
 	pthread_mutex_unlock(&server_ctx->clients_mutex);
 
 	// Set user (packet) count after confirming EXACTLY how many packets are being sent
-	// Also set timestamp with atomicio custom htonll enduan conversion (defined in at_net.h)
+	// Also set timestamp with atomicio custom htonll endian conversion (defined in at_net.h)
 	uint16_t net_act_usrs = htons((uint16_t)i);
-	uint64_t net_timestamp = htonll(now_ms());
+	uint64_t net_timestamp = at_htonll(now_ms());
 	for (int j = 0; j < i; j++) {
 		broadcast_buffer[j].active_users = net_act_usrs;
 		broadcast_buffer[j].timestamp = net_timestamp;

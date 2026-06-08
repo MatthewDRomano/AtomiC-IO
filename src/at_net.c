@@ -7,6 +7,13 @@
 #include <unistd.h>     // ssize_t
 #include <stdio.h>      // EOF enum
 
+// For Linux systems, blocking sigpipe from being raised is handled during send() with MSG_NOSIGNAL
+// For macOS it is handled upon socket creation elswhere. In that case MSG_NOSGINAL does not exist --> set to default 0
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+
 // Ensures full read
 int full_read(int socket_fd, packet_t* packet_buffer) {
         ssize_t result;
@@ -92,7 +99,8 @@ int full_write(int socket_fd, packet_t* packet_buffer, int packet_count) {
 		size_t n = PACKET_HEADER_SIZE + plength;
                 size_t bytes_written = 0;
                 while (bytes_written < n) {
-			// send flag: MSG_NOSIGNAL ensures sigpipe is not sent upon broken connection. Proper atomicio shutdown path takes place
+			// send flag: MSG_NOSIGNAL ensures sigpipe is not sent upon broken connection (macOS)
+			// Proper atomicio shutdown path takes place
                         result = send(socket_fd, (char*)current_packet + bytes_written, n - bytes_written, MSG_NOSIGNAL);
 
                         // Error while writing
@@ -111,10 +119,10 @@ int full_write(int socket_fd, packet_t* packet_buffer, int packet_count) {
 }
 
 
-uint64_t htonll(uint64_t ui64) {
+uint64_t at_htonll(uint64_t ui64) {
 	return htonl((uint32_t)(ui64 >> 32)) | ((uint64_t)htonl((uint32_t)ui64) << 32);
 }
 
-uint64_t ntohll(uint64_t ui64) {
+uint64_t at_ntohll(uint64_t ui64) {
 	return ntohl((uint32_t)(ui64 >> 32)) | ((uint64_t)ntohl((uint32_t)ui64) << 32);
 }

@@ -544,7 +544,7 @@ void* recv_thread(void* arg) {
                         memcpy(local_view.snapshots[i].payload, rx_pkt_buf[i].payload, rx_pkt_buf[i].payload_len);
                 }
                 local_view.count = active_users;
-		local_view.timestamp = ntohll(rx_pkt_buf[0].timestamp);
+		local_view.timestamp = at_ntohll(rx_pkt_buf[0].timestamp);
 
 		// Copy rx_pkt_buf and local_view data into respective client context fields in thread safe manner
                 pthread_mutex_lock(&client_ctx->all_clients_broadcast_mutex);
