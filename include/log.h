@@ -6,10 +6,10 @@
 #define MAX_MSG_LEN 128
 
 // Creates new log specific to server instance
-int init_log(char* path);
+int log_init();
 
 // Closes file descriptor to log upon shutdown
-int end_log();
+int log_shutdown();
 
 // Inserts human readable unix timestamp into time buffer
 // Seconds-Precision
@@ -24,17 +24,16 @@ void set_timestamp(char* time);
  * err_desc -> string describing error
  * client   -> client name
 */
-int errlog(const char* thread, 
-	   const char* call, 
-	   int fd, 
+int errlog(int fd, 
 	   int errnum,
-	   const char* err_desc,
-	   const char* client);
+	   const char* text,
+	   const char* client,
+	   const char* path);
 
 
 // Used to log info / track response time
 // msg is internally bounds checked and auto null terminated
 // so msg can safely be passed as any length
-int msglog(const char* msg);
+int msglog(const char* msg, const char* path);
 
 #endif

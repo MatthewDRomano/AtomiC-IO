@@ -18,3 +18,5 @@
 
 *.txt
 /build
+/lib
+/obj

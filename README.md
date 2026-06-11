@@ -9,8 +9,8 @@ AtomiC-IO solves "Global Lock Contention"—a common bottleneck in traditional b
 | Component | Implementation Details |
 | :--- | :--- |
 | **Language & Standard** | POSIX C11 |
-| **Concurrency Model** | Asymmetric threading, CAS-based linked lists, `<stdatomic.h>` |
-| **Networking** | IPv4 TCP Sockets, `poll()` I/O multiplexing |
+| **Concurrency Model** | Asymmetric threading, CAS-based linked lists, `<pthread.h>`, `<stdatomic.h>` |
+| **Networking** | IPv4 TCP Sockets, `poll()` I/O multiplexing,  |
 | **Platform Target** | macOS & Linux (Cross-platform TCP resilience mechanisms) |
 
 ---
@@ -18,7 +18,7 @@ AtomiC-IO solves "Global Lock Contention"—a common bottleneck in traditional b
 ### Core Engineering Features
 
 * **Lock-Minimal Concurrency:** Utilizes C11 `atomic_compare_exchange_weak/strong` for lock-free client ingestion. The main thread can continuously accept new users without blocking, even while heavy data broadcasts or memory cleanups are actively executing.
-* **Asymmetric Threading Model:** Workloads are aggressively isolated. The server operates utilizing a dedicated Acceptor thread, a background Reaper thread for safe dead-node unlinking, and independent `poll()`-driven I/O threads for each client.
+* **Asymmetric Threading Model:** Workloads are aggressively isolated. The server operates utilizing a dedicated Acceptor thread and independent `poll()`-driven I/O threads for each client. A background Reaper thread also spawns for safe dead-node unlinking—triggered via named kernel semaphores `<semaphore.h>`.
 * **Opaque Context Architecture:** Built using an object-oriented C pattern. Both the Server (`atomicio_server_ctx`) and Client (`atomicio_cl_t`) contexts are entirely opaque and isolated, allowing you to instantiate an unlimited number of server/client instances safely within a single host process.
 * **Cross-Platform TCP Resilience:** Network edge cases are explicitly handled at the kernel interface level. The framework seamlessly resolves `SIGPIPE` issues across both Linux (`MSG_NOSIGNAL`) and macOS (`SO_NOSIGPIPE`), alongside port reuse optimizations (`SO_REUSEPORT` / `SO_REUSEADDR`).
 * **Asynchronous Developer Logging:** Includes a dedicated, thread-safe logging pipeline. Logs are queued via a custom linked list and flushed by an isolated I/O thread regulated by POSIX semaphores, ensuring disk writes never block network operations.

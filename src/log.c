@@ -1,4 +1,4 @@
-#include "log.h"
+#include "../include/log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,40 +13,38 @@
 #include <time.h>
 #include <stdbool.h>
 
+#define SEM_NAME_MAX 31		// Older macOS versions limit named semaphore length to 31 chars
 
-// Instance specific log file path / name
-static char log_path[MAX_PATH_LEN] = {0};
-// Log file
-static FILE* log_f = NULL;
 // Forward func dec
 static void* perform_logging(void* arg);
 
 
 // write_log_entry() waits on this sem 
 static sem_t* log_sem; 
+static char sem_name[SEM_NAME_MAX];
 static pthread_t log_thread;
 static atomic_bool log_open = false;
 
 
 // Log entry with error format
 typedef struct err_entry {
-	char timestamp[TIMESTAMP_LEN];
-	const char* thread;
- 	const char* call;
 	int fd;
 	int errnum;
-	char err_desc[MAX_MSG_LEN];
-	const char* client;
+	char err_str[MAX_MSG_LEN];
+	char desc[MAX_MSG_LEN];
+	char client[MAX_MSG_LEN];
 } err_entry_t;
 
 // Log entry for standard messages
 typedef struct msg_entry {
-	char timestamp[TIMESTAMP_LEN];
 	char text[MAX_MSG_LEN];
 } msg_entry_t;
 
 
 typedef struct log_entry {
+	//FILE* file;	
+	char path[MAX_PATH_LEN];
+	char timestamp[TIMESTAMP_LEN];
 	bool isError;
 	union {
 		msg_entry_t message;
@@ -79,29 +77,25 @@ void set_timestamp(char* time) {
 }
 
 
-int init_log(char* path) {
+int log_init() {
 	// Log already initialized
 	if (atomic_load(&log_open))
 		return -1;
 	
 	// Creates semaphore w/ owner read / write, otherwise read only
-	char sem_name[MAX_PATH_LEN];
-	snprintf(sem_name, MAX_PATH_LEN, "/log_%d", getpid());
-        log_sem = sem_open(sem_name, O_CREAT, 0644, 1);
-        // Unlinks named semaphore from kernel
-        // Semaphore now persists for server lifetime instead of in kernel indefinitely
-        sem_unlink(sem_name);
-
+	snprintf(sem_name, SEM_NAME_MAX, "/log_%d", getpid());
+        log_sem = sem_open(sem_name, O_CREAT, 0644, 0);
+	
 	log_head = &dummy_node;	
 	log_tail = log_head;
 
 	// Spawns logging thread / Uses global log_path to store name
-	snprintf(log_path, MAX_PATH_LEN, "%s", path);
 	atomic_store(&log_open, true);
 	if (pthread_create(&log_thread, NULL, perform_logging, NULL) != 0) {
 		// Error spawning log thread
 		fprintf(stderr, "Error spawning log thread\n");
 		atomic_store(&log_open, false);
+		sem_unlink(sem_name);
 		sem_close(log_sem);	
 		return -1;
 	}
@@ -109,7 +103,7 @@ int init_log(char* path) {
 	return 0;
 }
 
-int end_log() {
+int log_shutdown() {
 	// Ignore end request; Already ended or never initialized
 	if (!atomic_load(&log_open)) 
 		return -1;
@@ -120,7 +114,7 @@ int end_log() {
 	sem_post(log_sem);	
 	pthread_join(log_thread, NULL);
 
-	// Safety drain of any leaked log_entries
+	// Safety drain of any leaked log_entries (skips dummy_node)
 	// No new nodes / no active logging thread allows for no mutex needed
 	log_entry_t* current = log_head->next_entry;
 	while (current != NULL) {
@@ -131,11 +125,14 @@ int end_log() {
 	
 	// Resets nodes in case of reinitializing a log
 	dummy_node.next_entry = NULL;
+	// Unlinks named semaphore from kernel
+	// Semaphore now persists for server lifetime instead of in kernel indefinitely
+	sem_unlink(sem_name);
 	sem_close(log_sem);
 	return 0;
 }
 
-int errlog(const char* thread, const char* call, int fd, int errnum, const char* err_desc, const char* client) {
+int errlog(int fd, int errnum, const char* desc, const char* client, const char* path) {
 	if (atomic_load(&log_open) == false)
 		return -1;
 	
@@ -144,30 +141,36 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
                 fprintf(stderr, "Error initializing err log entry");
                 return -1;
         }
+
+	// Set log entry path
+        snprintf(new_entry->path, MAX_PATH_LEN, "%s.txt", path);
+
+
 	new_entry->isError = true;
 	new_entry->next_entry = NULL;	
 
 	// Set fields
 	// Ensures max length of TIMESTAMP_LEN
-        set_timestamp(new_entry->format.error.timestamp);
-	// const char* always safe (saved in data segment)
-	new_entry->format.error.thread = thread;
-	new_entry->format.error.call = call;
+        set_timestamp(new_entry->timestamp);
 	new_entry->format.error.fd = fd;
 	new_entry->format.error.errnum = errnum;
 		
-	// Null terminated
-	strerror_r(errnum, new_entry->format.error.err_desc, MAX_MSG_LEN);
-	//snprintf(new_entry->format.error.err_desc, MAX_MSG_LEN, "%s", strerror(errnum));
-	new_entry->format.error.client = client;
+	// If errnum is a valid errno value (>0), set desc as errno description
+	// Otherwise, use custom desc text provided by user 
+	if (errnum > 0)
+		strerror_r(errnum, new_entry->format.error.err_str, MAX_MSG_LEN);
+	else
+		*new_entry->format.error.err_str = '\0';
 	
+	snprintf(new_entry->format.error.desc, MAX_MSG_LEN, "%s", desc);
+	snprintf(new_entry->format.error.client, MAX_MSG_LEN, "%s", client);	
 
 	// Waits for potential other threads to finish adding new entry
 	pthread_mutex_lock(&queue_mutex);
 	// Final check to ensure log isn't mid shutdown
 	if (!atomic_load(&log_open)) {
                 pthread_mutex_unlock(&queue_mutex);
-                free(new_entry); // Safely discard the allocated node
+		free(new_entry); // Safely discard the allocated node
                 return -1;
         }
 	log_entry_t* prev = log_tail;
@@ -180,7 +183,7 @@ int errlog(const char* thread, const char* call, int fd, int errnum, const char*
         return 0;
 }
 
-int msglog(const char* msg) {
+int msglog(const char* msg, const char* path) {
         if (atomic_load(&log_open) == false)
                 return -1;
 
@@ -189,14 +192,15 @@ int msglog(const char* msg) {
 		fprintf(stderr, "Error initializing msg log entry");
 		return -1;
 	}
+
+	// Set log entry path
+	snprintf(new_entry->path, MAX_PATH_LEN, "%s.txt", path);
+	
 	new_entry->isError = false;
 	new_entry->next_entry = NULL;
-	//new_entry->next_entry = (log_entry_t*)&SENTINEL;
 
-	// Ensures max length of TIMESTAMP_LEN
-        set_timestamp(new_entry->format.message.timestamp);
+        set_timestamp(new_entry->timestamp); // Ensures max length of TIMESTAMP_LEN
 	snprintf(new_entry->format.message.text, MAX_MSG_LEN, "%s", msg);
-	new_entry->format.message.text[MAX_MSG_LEN-1] = '\0';
 	
 	// Waits for potential other threads to finish adding new entry	
 	pthread_mutex_lock(&queue_mutex);
@@ -204,7 +208,7 @@ int msglog(const char* msg) {
 	if (!atomic_load(&log_open)) {
     		pthread_mutex_unlock(&queue_mutex);
     		free(new_entry); // Safely discard the allocated node
- 		return -1;
+		return -1;
 	}
 	log_entry_t* prev = log_tail;
         log_tail = new_entry;
@@ -217,35 +221,22 @@ int msglog(const char* msg) {
 }
 
 static void* perform_logging(void* arg) {
-	
-	/* 
-	  Creates instance specific log w/ pre specified log_path from init method
-	 * Waits on semaphore; Writes log entry to log upon sem_post
-	*/
-	
-	char time_s[TIMESTAMP_LEN] = {0};
-        set_timestamp(time_s);
-
-	char timestamped_path[MAX_PATH_LEN + TIMESTAMP_LEN + 5]; // 5 for '_' and ".txt"
-        snprintf(timestamped_path, MAX_PATH_LEN + TIMESTAMP_LEN + 5, "%s_%s.txt", log_path, time_s);
-
-        log_f = fopen(timestamped_path, "w");
-        if (log_f == NULL) {
-                fprintf(stderr, "Error creating log file. Ironic\n");
-                goto term_thread;
-        }
-
-        fprintf(log_f, "==========Log START==========\n\n");	
+	(void)arg; // Silence unused parameter compiler warning
 	
 
 	// Begin; handle logging
-	while (atomic_load(&log_open)) {
-		sem_wait(log_sem);
+	bool final_sweep_flag = true;
+	while (atomic_load(&log_open) || final_sweep_flag) {
+		// Waits for a log entry while the server is running
+		if (atomic_load(&log_open))
+			sem_wait(log_sem);
 
 		while (sem_trywait(log_sem) == 0) {
 			; // sem_trywait drains log_sem until it becomes 0
 		}
 		
+		if (!atomic_load(&log_open))
+			final_sweep_flag = false;
 		
 		// Ensures log is not in the middle of adding entry
 		// Sets current equal to the true head (first non-dummy node)
@@ -258,35 +249,37 @@ static void* perform_logging(void* arg) {
 		pthread_mutex_unlock(&queue_mutex);
 
 		// Logs all entries, ignoring first dummy node
-		while (current != NULL) {
+		while (current != NULL) {	
+			FILE* log_file = fopen(current->path, "a");
+			if (!log_file) 		// Invalid path or other fopen error
+				goto skip_log;
+	
 			// Prints appropriate log type (msg/err) based on union format value 		
 			if (!current->isError) {
 				msg_entry_t* message = &current->format.message;
 				// Prints message / timestampe is red
-				if (fprintf(log_f, "\e[0;32m[%s]\e[0m | %s\n", message->timestamp, message->text) == EOF)
+				if (fprintf(log_file, "\e[0;32m[%s]\e[0m | %s\n", current->timestamp, message->text) == EOF)
         		      		fprintf(stderr, "Error writing msg log entry\n");
         		}
 
 			else if (current->isError) {
 				err_entry_t* error = &current->format.error;
 				// Prints error / timestamp is red
-				if (fprintf(log_f, "\e[0;31m[%s]\e[0m | thread: %s | %s | fd=%d | Error: %s | Client name: %s\n",
-                                error->timestamp, error->thread, error->call, error->fd, error->err_desc, error->client) == EOF)
+				if (fprintf(log_file, "\e[0;31m[%s]\e[0m | fd=%d | Client name: %s | Error: %s | Desc: %s |\n",
+                                current->timestamp, error->fd, error->client, error->err_str, error->desc) == EOF)
                                         fprintf(stderr, "Error writing err log entry\n");
 			}
-		
+
+			fclose(log_file);
+			
+			skip_log:
 			log_entry_t* prev = current;	
 			current = current->next_entry;
 			free(prev);	
 		}
 		
-		// Flush log buffer 
-		fflush(log_f);
 	}	
 	
-	fclose(log_f);
-	
-	term_thread:
 	atomic_store(&log_open, false);	
 	return NULL;
 }

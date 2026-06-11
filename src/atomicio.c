@@ -18,12 +18,13 @@
 #include <fcntl.h>
 #include <time.h>
 
-#include "at_net.h"
-#include "atomicio.h"
-#include "log.h"
+#include "../include/at_net.h"
+#include "../include/atomicio.h"
+#include "../include/log.h"
 
 #define MIN_PORT 1024
 #define MAX_PORT 49151
+#define SEM_NAME_MAX 31         	// Older macOS versions limit named semaphore length to 31 chars
 #define CLIENT_STACK_SIZE (1024 * 256)  // 256 KB
 
 #define ATOMICIO_MAGIC_COOKIE 0x006174696F737600 // " atiosv " 
@@ -243,7 +244,7 @@ static void* client_io_thread(void* args) {
 	// Allows for the send_by_type() write buffer to be on the heap instead of TLS
 	packet_t* broadcast_buffer = (packet_t*)malloc(sizeof(packet_t) * MAX_CONNECTIONS);
 	if (!broadcast_buffer) {
-		errlog("Client", "malloc", ct->client_fd, errno, "N/A", "N/A"); // Not worried about race. ct->client_fd is effectively read only
+		errlog(ct->client_fd, errno, "IO thread: malloc()", "N/A", server_ctx->settings.log_path); // Not worried about race. ct->client_fd is effectively read only
 		goto err_kill_client;
 	}
 
@@ -279,8 +280,8 @@ static void* client_io_thread(void* args) {
 		// Error during poll()
 		if (ret < 0)
                         if (errno != EINTR) {
-                                errlog("Client", "poll", io_fd, errno, "N/A", rx_pkt_buf.client_uuid);
-                                break;
+                                errlog(io_fd, errno, "IO thread: poll()", rx_pkt_buf.client_uuid, server_ctx->settings.log_path);
+				break;
                         }
 
 		if (ret > 0) {
@@ -298,7 +299,7 @@ static void* client_io_thread(void* args) {
 				if ((result = full_read(io_fd, &rx_pkt_buf)) != 0) {
 					char dc_msg[MAX_MSG_LEN];
 					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", rx_pkt_buf.client_uuid);
-					msglog(dc_msg);	
+					msglog(dc_msg, server_ctx->settings.log_path);	
 					
 					break;
 				}
@@ -306,7 +307,7 @@ static void* client_io_thread(void* args) {
 
 				// Checks if the packet's token is equal to AtomiC-IO's protocol magic number
 				if (ntohl(rx_pkt_buf.token) != ATOMICIO_PROTOCOL_MAGIC) {
-					errlog("Recv", "packet auth", io_fd, -1, "Inv auth token", rx_pkt_buf.client_uuid);
+					errlog(io_fd, -1, "IO thread: Packet auth", rx_pkt_buf.client_uuid, server_ctx->settings.log_path);
 					break;			
 				}
 
@@ -317,13 +318,13 @@ static void* client_io_thread(void* args) {
 					case LOGIN:
 						char connect_msg[MAX_MSG_LEN];
                                         	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", rx_pkt_buf.client_uuid);
-                                        	msglog(connect_msg);
+                                        	msglog(connect_msg, server_ctx->settings.log_path);
 						break;
 					case UPDATE_MESSAGE:
 						break;
 					// Invalid types are logged and treated as catastrophic
 					default:
-						errlog("Recv", "msg parse", io_fd, -1, "Inv msg type", rx_pkt_buf.client_uuid);
+						errlog(io_fd, -1, "IO thread: msg parse", rx_pkt_buf.client_uuid, server_ctx->settings.log_path);
 						should_disconnect = true;
 						break;
 				}	
@@ -356,7 +357,7 @@ static void* client_io_thread(void* args) {
 				const char* status = (server_ctx->settings.drop_late_packets) ? "[PACKETS DROPPED]" : "";
 				char msg[MAX_MSG_LEN];
 				snprintf(msg, MAX_MSG_LEN, "%s: %.3fx Latency %s", rx_pkt_buf.client_uuid, latency_ratio, status);
-				msglog(msg);
+				msglog(msg, server_ctx->settings.log_path);
 			}
 			
 			// Drop packets if specified
@@ -372,7 +373,7 @@ static void* client_io_thread(void* args) {
                         if ((result = send_by_type(server_ctx, broadcast_buffer, io_fd, UPDATE_MESSAGE)) != 0) {
                         	char dc_msg[MAX_MSG_LEN];
                                 snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", rx_pkt_buf.client_uuid);
-                                msglog(dc_msg); 
+                                msglog(dc_msg, server_ctx->settings.log_path); 
                                 break;
                         }
 		}
@@ -418,8 +419,8 @@ static void* client_accept_thread(void* arg) {
                                 sleep(1);
 
                         else if (errno == ENOMEM) {
-                                errlog("Main", "Accept", client_fd, errno, "No Mem", "New User");
-                                atomic_store(&server_ctx->shutdown_requested, true);
+                                errlog(client_fd, -1, "Accept thread: accept() nomem", "New user", server_ctx->settings.log_path);
+				atomic_store(&server_ctx->shutdown_requested, true);
                         }
 
                         // Depending on error, client either stays or is removed by kernel from accept queue
@@ -440,15 +441,15 @@ static void* client_accept_thread(void* arg) {
 
 
 		// On older macOS systems, setting SO_NOSIGPIPE flag is needed to ensure sigpipe is not raised on write errors due to disrupted connection
-		int opt = 1;
 		#ifdef SO_NOSIGPIPE
+		int opt = 1;
 		setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &opt, sizeof(opt));
 		#endif		
 
                 // Create new client once accepted
                 client_thread_t* ct = (client_thread_t*)calloc(1, sizeof(client_thread_t));
                 if (!ct) {
-                        errlog("Main", "calloc", -1, errno, "N/A", "N/A");
+			errlog(-1, errno, "Accept thread: calloc()", "New user", server_ctx->settings.log_path);
                         close(client_fd);
                         break;
                 }
@@ -461,7 +462,7 @@ static void* client_accept_thread(void* arg) {
 		// To be freed by the client thread upon success
 		cthread_args_t* ct_thread_args = (cthread_args_t*)malloc(sizeof(cthread_args_t));
 		if (!ct_thread_args) {
-			errlog("Main", "malloc", -1, errno, "Client thread args allocation", "N/A");
+			errlog(-1, errno, "Accept thread: malloc()", "New user", server_ctx->settings.log_path);
 			close(client_fd);
 			free(ct);
 			break;
@@ -492,8 +493,8 @@ static void* client_accept_thread(void* arg) {
 
                 // Failed to create thread (before adding to global list)
                 else {
-                        errlog("Main", "pthread_create", ct->client_fd, rc, "N/A", "N/A"); // Errno not set
-
+			errlog(ct->client_fd, rc, "Accept thread: pthread_create()", "New user", server_ctx->settings.log_path);
+	
                         // Manual cleanup since we cannot reap a nonexistent thread
                         close(client_fd);
                         free(ct_thread_args);
@@ -596,7 +597,7 @@ atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settin
 
         // Creates semaphore w/ owner read / write, otherwise read only
 	unsigned long long unique_sem_id = atomic_fetch_add(&sem_counter, 1ull);
-	snprintf(new_server_ctx->sem_name, MAX_PATH_LEN, "/reaper_sem%llu", unique_sem_id); // MacOs and Linux differ in Posix named semaphore name lengths. (Some MacOs versions allow 31 chars max)
+	snprintf(new_server_ctx->sem_name, SEM_NAME_MAX, "/reaper_sem%llu", unique_sem_id); // MacOs and Linux differ in Posix named semaphore name lengths. (Some MacOs versions allow 31 chars max)
         
 	new_server_ctx->clients_cleanup_sem = sem_open(new_server_ctx->sem_name, O_CREAT, 0644, 0);
         if (new_server_ctx->clients_cleanup_sem == SEM_FAILED) {
@@ -605,10 +606,6 @@ atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settin
                 goto err_destroy_mutex;
         }
 
-
-        // Error opening error log; treated as catastrophic
-        if (init_log(new_server_ctx->settings.log_path) != 0)
-                goto err_close_sem;
 
 	
 	// No error --> set proper state and stamp server context token
@@ -624,12 +621,13 @@ atomicio_server_ctx* atomicio_create_server(const atomicio_config_t* init_settin
 	// ========================================================
 
 
-	// Closes semaphore
+	/*// Closes semaphore
 	err_close_sem:
 	// Unlinks named semaphore from kernel
 	sem_unlink(new_server_ctx->sem_name); 		// NEED TO ADD SEM_NAME TO CONTEXT AND UNLINK WHENEVER DESTROY
 	sem_close(new_server_ctx->clients_cleanup_sem);
-	
+*/	
+
 	err_destroy_mutex:
 	pthread_mutex_destroy(&new_server_ctx->clients_mutex);
 
@@ -740,11 +738,9 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
 	err_kill_reaper:
 	sem_post(server_ctx->clients_cleanup_sem);
         pthread_join(server_ctx->reaper_tid, NULL);
-        sem_close(server_ctx->clients_cleanup_sem);	
 	
 	// Closes log and listening fd
 	err_close_server_rsrcs:
-	end_log();
 	int fd_to_close = atomic_exchange(&server_ctx->settings.socket_fd, -1);
 	if (fd_to_close >= 0)
 		close(fd_to_close);
@@ -823,8 +819,6 @@ int atomicio_server_shutdown(atomicio_server_ctx* server_ctx) {
 	// RESET shutdown flag to allow subsequent runs
 	atomic_store(&server_ctx->shutdown_requested, false);
 
-        // Close log
-        //end_log(); PUT IN DESTROY METHOD
 
 	return 0;
 }
@@ -848,13 +842,11 @@ int atomicio_server_destroy(atomicio_server_ctx** server_ctx_ptr) {
 	pthread_mutex_destroy(&server_ctx->clients_mutex);
 	pthread_attr_destroy(&server_ctx->client_attr);
 	
-	// Unlinks named semaphore from kernel and closes it
+	// Unlinks named semaphore from kernel and closes it 
+	// Saves kernel unlink for server context destruction
 	sem_unlink(server_ctx->sem_name);
 	sem_close(server_ctx->clients_cleanup_sem);
 	
-	// Close log instance
-	end_log();
-
 	// Brick the magic cookie to invalidate stale pointers
 	server_ctx->token = 0ull;
 
@@ -871,13 +863,6 @@ bool atomicio_is_running(atomicio_server_ctx* server_ctx) {
 		return false; // Returns false on structural API error
 	
 	return atomic_load(&server_ctx->state) == STATE_ONLINE;
-}
-
-// Logs a message
-void atomicio_log(const char* msg) {
-
-	// Passes along log message
-	msglog(msg);		
 }
 
 
@@ -927,3 +912,32 @@ int64_t atomicio_get_dropped_packets_count(atomicio_server_ctx* server_ctx) {
 
 	return atomic_load(&server_ctx->metadata.packets_dropped);
 }	
+
+// Initialzies log fields and spawns logging thread.
+// Lifecycle is independent from all server contexts
+int atomicio_log_init() {
+	return(log_init());
+}
+
+// Cleans up log resources, performs a final log entry sweep, and closes log
+int atomicio_log_shutdown() {
+	return(log_shutdown());
+}
+
+// Creates a message log entry with specified info.
+// Returns -1 if the server_ctx is not valid, or logging error occurs
+int atomicio_log_info(atomicio_server_ctx* server_ctx, const char* info) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
+
+	return msglog(info, server_ctx->settings.log_path);
+}
+
+// Creates an error log entry with specified description and errno value.
+// Returns -1 if the server_ctx is not valid, or logging error occurs
+int atomicio_log_error(atomicio_server_ctx* server_ctx, int errnum, const char* err_desc) {
+	if (!server_ctx || server_ctx->token != ATOMICIO_MAGIC_COOKIE)
+                return -1; // Returns -1 on structural API error
+
+	return errlog(-1, errnum, err_desc, "N/A", server_ctx->settings.log_path);
+}

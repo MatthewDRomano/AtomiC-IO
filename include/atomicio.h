@@ -91,12 +91,33 @@ int64_t atomicio_get_dropped_packets_count(atomicio_server_ctx* server_ctx);
 
 
 // ========================================================
-// 4. USER LOGGING 
+// 4. Thread safe user logging APIs
 // ========================================================
 
 /**
- * Thread-safe logging option allowing custom message control for the user.
+ * Initializes atomicio log global fields, and spawns background logging thread.
+ * Disk IO is handled in the background logging thread for maximum performance.
  */ 
-void atomicio_log(const char* msg);
+int atomicio_log_init();
+
+/**
+ * Cleans up log resources, performs one final log entry sweep, and shuts down log.
+ */ 
+int atomicio_log_shutdown();
+
+/**
+ * Internally creates a message log entry with given server context's path.
+ *
+ * Returns 0 upon success, -1 on failure
+ */
+int atomicio_log_info(atomicio_server_ctx* server_ctx, const char* info);
+
+/**
+ * Internally creates an error log entry with an errno value and the given server context's path.
+ *
+ * Returns 0 upon success, -1 on failure
+ */
+int atomicio_log_error(atomicio_server_ctx* server_ctx, int errnum, const char* err_desc);
+
 
 #endif

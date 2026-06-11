@@ -16,9 +16,8 @@
 #include <stdatomic.h>
 #include <fcntl.h>
 
-#include "atomicio_cl.h"
-#include "at_net.h"
-#include "log.h"
+#include "../include/atomicio_cl.h"
+#include "../include/at_net.h"
 
 
 #define MAX_PORT 65535
@@ -65,7 +64,6 @@ struct atomicio_client_ctx {
 
 	pthread_t recv_tid;
 
-	char log_path[MAX_PATH_LEN];
 	_Atomic int active_user_count;
 	_Atomic(client_state_t) state;
 };
@@ -86,7 +84,7 @@ static uint64_t now_ms() {
 
 
 
-atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
+atomicio_cl_t* atomicio_cl_create(const char* uuid) {
 	// Allocate space for new client on heap
 	atomicio_cl_t* new_client_ctx = (atomicio_cl_t*)malloc(sizeof(atomicio_cl_t));
 	if (!new_client_ctx) {
@@ -117,10 +115,9 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path) {
                 goto err_destroy_client_mutex;
         }
 
-	// Set specified client fields -> uuid and log_path
-	// Bound constants defined in at_net.h / log.h respectively
+	// Set specified uuid
+	// Bound constant defined in at_net.h
 	snprintf(new_client_ctx->my_client.client_uuid, CLIENT_USERNAME_SIZE, "%s", uuid);
-	snprintf(new_client_ctx->log_path, MAX_PATH_LEN, "%s", log_path);
 	
 	// Init client metadata
 	atomic_init(&new_client_ctx->active_user_count, 0);
@@ -244,21 +241,16 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
         atomic_store(&client_ctx->state, STATE_CONNECTED);
 	atomic_store(&client_ctx->metadata.connection_epoch, now_ms());	
 
-	/*
-	if (init_log(client_ctx->log_path) == -1)
-                goto err_close_fd;
-	*/
 
         // Login message to the server
         client_ctx->my_client.payload_len = htons(1);
 	atomicio_cl_send_data(client_ctx, LOGIN);
-        //msglog("-==CONNECTED==-");
 
 
         // Spawn receive thread
         if (pthread_create(&client_ctx->recv_tid, NULL, recv_thread, client_ctx) != 0) {
                 fprintf(stderr, "Failed to receive send thread\n");
-                goto err_close_log;
+                goto err_close_fd;
         }	
 
 
@@ -269,8 +261,6 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
         // Cascading error resource cleanup
         // ========================================================
 	
-	err_close_log:
-	//end_log();
 	
 	err_close_fd:
 	int fd_to_close = client_ctx->network.socket_fd;
@@ -301,7 +291,6 @@ static void internal_connection_teardown(atomicio_cl_t* client_ctx) {
 			shutdown(client_ctx->network.socket_fd, SHUT_RDWR);	
 			client_ctx->network.socket_fd = -1;
 			close(fd_to_close);
-			//msglog("-==DISCONNECTED==-");
 		}
 	}
 }
@@ -325,7 +314,6 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 	pthread_join(client_ctx->recv_tid, NULL);
 
 	atomic_store(&client_ctx->state, STATE_DISCONNECTED);
-	//msglog("Background receiver thread cleanly joined");
 	
 	// Reset necessary client runtime fields to default values
 	atomic_store(&client_ctx->active_user_count, 0);
@@ -338,8 +326,6 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 	memset(client_ctx->all_clients_broadcast, 0, sizeof(packet_t) * MAX_CONNECTIONS);
 	pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);
 
-	// Close log upon dc
-	//end_log();
 	return 0;
 }
 
@@ -360,9 +346,6 @@ int atomicio_cl_destroy(atomicio_cl_t** client_ctx_ptr) {
 	// Clean up client mutexes
 	pthread_mutex_destroy(&client_ctx->my_client_mutex);
 	pthread_mutex_destroy(&client_ctx->all_clients_broadcast_mutex);
-
-	// Close client log
-	//end_log();
 
 	// Brick magic token to avoid stale pointers
 	client_ctx->token = 0;
@@ -489,7 +472,6 @@ void* recv_thread(void* arg) {
 	// Allocate temporary receive packet buffer onto the heap	
 	packet_t* rx_pkt_buf = (packet_t*)malloc(sizeof(packet_t) * MAX_CONNECTIONS);	
 	if (!rx_pkt_buf) {
-		//errlog...
 		internal_connection_teardown(client_ctx);	
 		return NULL;
 	}
@@ -512,7 +494,6 @@ void* recv_thread(void* arg) {
 			case LOGOUT:
 				// Initiates logout sequence -> User must finalize with atomicio_cl_disconnect() call
 				internal_connection_teardown(client_ctx);
-				//msglog("-==SERVER REQUESTING LOGOUT==-");
 				should_exit_loop = true;
 				break;
 			case UPDATE_MESSAGE:
@@ -522,7 +503,6 @@ void* recv_thread(void* arg) {
 			default:
 				// Initiates logout sequence -> User must finalize with atomicio_cl_disconnect() call
 				internal_connection_teardown(client_ctx);
-				//errlog("Recv", "msg parse", client_ctx->network.socket_fd, -1, "Inv msg type", client_ctx->my_client.client_uuid);
 				should_exit_loop = true;
 				break;
 		}

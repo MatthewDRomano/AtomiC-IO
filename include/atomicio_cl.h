@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "at_net.h"
+#include "../include/at_net.h"
 
 // 0. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
 // 	|-> Stores client data internally and encapsulates internal structure
@@ -29,11 +29,11 @@ typedef struct {
 // ========================================================
 
 /**
- * Takes a unique client uuid and desired log_path.
+ * Takes a unique client uuid.
  * Returns a pointer to an opaque atomicio client struct allocated on the heap
  * atomicio_cl_destroy must be called eventually to free client memory
  */ 
-atomicio_cl_t* atomicio_cl_create(const char* uuid, const char* log_path);
+atomicio_cl_t* atomicio_cl_create(const char* uuid);
 
 
 /**
@@ -47,7 +47,7 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port, const char*
 
 /**
  * Sets connection flags to false and begins a graceful disconnect from the server.
- * After disconnecting, the client log is closed and client resources are cleaned up 
+ * After disconnecting, client resources are cleaned up 
  * ONLY returns -1 upon invalid / corrupted client_ctx arg. In practice the return value can be ignored.
  */
 int atomicio_cl_disconnect(atomicio_cl_t* client_ctx);
@@ -134,15 +134,5 @@ int64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx);
  * Returns -1 if the client context is not valid 
 */
 int64_t atomicio_cl_get_bytes_received(atomicio_cl_t* client_ctx);
-
-// ========================================================
-// 5. USER LOGGING
-// ========================================================
-
-/**
- * Thread-safe logging option allowing custom message control for the client.
- * Can safely call after config init
- */ 
-int atomicio_cl_log(atomicio_cl_t* client_ctx, const char* msg);
 
 #endif
