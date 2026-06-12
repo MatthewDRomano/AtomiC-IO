@@ -113,18 +113,7 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid) {
 	// 4. Set specified uuid --> Bound constant defined in at_net.h
 	snprintf(new_client_ctx->my_client.client_uuid, CLIENT_USERNAME_SIZE, "%s", uuid);
 
-<<<<<<< HEAD
 	// 5. Initialize necessary Atomics (Only nonzero ones or for explicit readibility)
-=======
-	// Set recv thread joined default value
-	atomic_init(&new_client_ctx->recv_thread_active, false);
-	
-	
-	// Init client metadata
-	atomic_init(&new_client_ctx->active_user_count, 0);
-	atomic_init(&new_client_ctx->metadata.bytes_sent, 0);
-	atomic_init(&new_client_ctx->metadata.bytes_received, 0);
->>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 	atomic_init(&new_client_ctx->metadata.init_epoch, now_ms());
 	atomic_init(&new_client_ctx->state, STATE_DISCONNECTED);
 	atomic_init(&new_client_ctx->recv_thread_active, false);
@@ -272,17 +261,10 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
  * Upon successful teardown, the user must call atomicio_cl_disconnect() to finalize the disconnection process
  */ 
 static void internal_connection_teardown(atomicio_cl_t* client_ctx) {
-<<<<<<< HEAD
 
 	// This will run once, even if both recv and main threads detect failure concurrently
 	client_state_t expected = STATE_CONNECTED;
 	if (!atomic_compare_exchange_strong(&client_ctx->state, &expected, STATE_AWAITING_CLEANUP))
-=======
-	// Ensures this block only runs if client state is connected
-	// This will run once, even if both recv and send threads detect failure concurrently
-	client_state_t expected = STATE_CONNECTED;
-	if (atomic_compare_exchange_strong(&client_ctx->state, &expected, STATE_AWAITING_CLEANUP))
->>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 		return;
 		
 	// Interrupts blocking read / write
@@ -299,14 +281,6 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
                 return -1; // Returns -1 on structural API error
 	
-<<<<<<< HEAD
-=======
-	// Ensures object is able to be disconnected (in state CONNECTED or AWAITING_CLEANUP)
-	//client_state_t old_state = atomic_exchange(&client_ctx->state, STATE_AWAITING_CLEANUP);
-	//if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
-	//	return 0;
-
->>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 	// Severs TCP and sets state to awaiting cleanup
 	internal_connection_teardown(client_ctx);
 
