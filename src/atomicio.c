@@ -122,15 +122,18 @@ static uint64_t now_ms() {
 static void cleanup_client(client_thread_t* ct) {
 
 	// Closes connection & fd / ensures client thread ends
-	shutdown(ct->client_fd, SHUT_RDWR);
-        close(ct->client_fd);
-        //	//ct->client_fd = -1;
-
+	int fd_to_close = ct->client_fd;
+	if (fd_to_close >= 0) {
+		shutdown(ct->client_fd, SHUT_RDWR);
+        	close(ct->client_fd);
+		ct->client_fd = -1;
+	}
+	
 	// Avoids deadlock in other threads if join stalls
         pthread_join(ct->thread, NULL);
 
         // Frees associated memory / only after client thread ends
-        free(ct);
+	free(ct);
 }
 
 
@@ -139,8 +142,8 @@ static void* reaper_thread(void* arg) {
 	atomicio_server_ctx* server_ctx = (atomicio_server_ctx*)arg;	
 
 	// Ensures a final sweep happens when the server is shutting down
-	int final_sweep_flag = 1;
-	while(atomic_load(&server_ctx->state) == STATE_ONLINE || final_sweep_flag-- == 1) {
+	bool final_sweep_flag = true;
+	while(atomic_load(&server_ctx->state) == STATE_ONLINE || final_sweep_flag) {
 	
 		// Upon spurious wakeups, reaper thread safely falls through the below iteration loop back to sem_wait.
 		// Thread waits until sem is posted (client marked finished)
@@ -149,7 +152,7 @@ static void* reaper_thread(void* arg) {
 
 		// At this point a final sweep is already occurring
 		if (atomic_load(&server_ctx->state) == STATE_OFFLINE) {
-			final_sweep_flag = 0; // Prevents outer loop from allowing another sweep
+			final_sweep_flag = false; // Prevents outer loop from allowing another sweep
 		}
 		
 		while (sem_trywait(server_ctx->clients_cleanup_sem) == 0) { // sem_trywait returns 0 if successful decrement

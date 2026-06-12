@@ -94,6 +94,8 @@ bool atomicio_cl_is_connected(atomicio_cl_t* client_ctx);
 /**
  * Takes valid client context and broadcast view pointers. 
  * Populates 'view' with a snapshot of the current broadcast data of all active clients
+ * The order of client data in the snapshot is arbitrary, and is subject to vary across different calls.
+ * 	|-> uuid can be used to discern clients
  *
  * Returns 0 upon success, -1 if invalid args
  */ 

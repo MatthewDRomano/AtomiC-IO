@@ -62,6 +62,7 @@ struct atomicio_client_ctx {
 	network_t network;
 	telemetry_t metadata;
 
+	_Atomic bool recv_thread_active;
 	pthread_t recv_tid;
 
 	_Atomic int active_user_count;
@@ -118,6 +119,10 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid) {
 	// Set specified uuid
 	// Bound constant defined in at_net.h
 	snprintf(new_client_ctx->my_client.client_uuid, CLIENT_USERNAME_SIZE, "%s", uuid);
+
+	// Set recv thread joined default value
+	atomic_init(&new_client_ctx->recv_thread_active, false);
+	
 	
 	// Init client metadata
 	atomic_init(&new_client_ctx->active_user_count, 0);
@@ -164,6 +169,10 @@ static int atomicio_connect_to_host(atomicio_cl_t* client_ctx, const char* ipv4_
                 	perror("Client socket creation failed");
                 	continue;
         	}	
+
+		// Set SO_REUSEADDR so clients can reestablish TCP connections with server from ports stuck in TIME_WAIT (TCP state)
+                int reuse = 1;
+                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));	
 
 		// Ensures sigpipe is disallowed on older macOS systems
         	#ifdef SO_NOSIGPIPE
@@ -235,7 +244,7 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
 
 	client_ctx->network.socket_fd = -1;
 	if (atomicio_connect_to_host(client_ctx, ipv4_domain, port_str) != 0)
-		goto err_close_fd;	
+		return -1;	
 
 	// Connection successful
         atomic_store(&client_ctx->state, STATE_CONNECTED);
@@ -247,30 +256,14 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
 	atomicio_cl_send_data(client_ctx, LOGIN);
 
 
-        // Spawn receive thread
+        // Spawn receive thread --> call disconnect on error
         if (pthread_create(&client_ctx->recv_tid, NULL, recv_thread, client_ctx) != 0) {
                 fprintf(stderr, "Failed to receive send thread\n");
-                goto err_close_fd;
-        }	
-
-
+        	atomicio_cl_disconnect(client_ctx);
+		return -1; 
+	}	
 
 	return 0;	
-
-	// ========================================================
-        // Cascading error resource cleanup
-        // ========================================================
-	
-	
-	err_close_fd:
-	int fd_to_close = client_ctx->network.socket_fd;
-        if (fd_to_close >= 0) {
-                client_ctx->network.socket_fd = -1;
-                close(fd_to_close);
-        }
-	
-	atomic_store(&client_ctx->state, STATE_DISCONNECTED);
-	return -1;
 }
 
 
@@ -283,16 +276,14 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
 static void internal_connection_teardown(atomicio_cl_t* client_ctx) {
 	// Ensures this block only runs if client state is connected
 	// This will run once, even if both recv and send threads detect failure concurrently
-	if (atomic_exchange(&client_ctx->state, STATE_AWAITING_CLEANUP) == STATE_CONNECTED) {	
+	client_state_t expected = STATE_CONNECTED;
+	if (atomic_compare_exchange_strong(&client_ctx->state, &expected, STATE_AWAITING_CLEANUP))
+		return;
 		
-		// Interrupts blocking read / write
-		int fd_to_close;
-		if ((fd_to_close = client_ctx->network.socket_fd) >= 0) {
-			shutdown(client_ctx->network.socket_fd, SHUT_RDWR);	
-			client_ctx->network.socket_fd = -1;
-			close(fd_to_close);
-		}
-	}
+	// Interrupts blocking read / write
+	int fd = client_ctx->network.socket_fd;
+	if (fd >= 0)
+		shutdown(fd, SHUT_RDWR);	
 }
 
 
@@ -304,21 +295,30 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
                 return -1; // Returns -1 on structural API error
 	
 	// Ensures object is able to be disconnected (in state CONNECTED or AWAITING_CLEANUP)
-	if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
-		return -1;
+	//client_state_t old_state = atomic_exchange(&client_ctx->state, STATE_AWAITING_CLEANUP);
+	//if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
+	//	return 0;
 
 	// Severs TCP and sets state to awaiting cleanup
 	internal_connection_teardown(client_ctx);
 
 	// GUARANTEED REAP: Waits and joins receive thread and sets state to disconnected
-	pthread_join(client_ctx->recv_tid, NULL);
+	if (atomic_load(&client_ctx->recv_thread_active)) {
+		pthread_join(client_ctx->recv_tid, NULL);
+		atomic_store(&client_ctx->recv_thread_active, false); // Clears field
+	}
+	
+	// Closes fd (socket resource) after thread is joined
+	if (client_ctx->network.socket_fd >= 0) {
+		close(client_ctx->network.socket_fd);
+		client_ctx->network.socket_fd = -1;
+	}
 
-	atomic_store(&client_ctx->state, STATE_DISCONNECTED);
 	
 	// Reset necessary client runtime fields to default values
 	atomic_store(&client_ctx->active_user_count, 0);
 
-	// Clear network condif
+	// Clear network config
 	client_ctx->network = (network_t){0};
 	
 	// Clear stale broadcast data
@@ -326,6 +326,9 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 	memset(client_ctx->all_clients_broadcast, 0, sizeof(packet_t) * MAX_CONNECTIONS);
 	pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);
 
+	
+	// Finalize state and return
+	atomic_store(&client_ctx->state, STATE_DISCONNECTED);
 	return 0;
 }
 
@@ -338,9 +341,8 @@ int atomicio_cl_destroy(atomicio_cl_t** client_ctx_ptr) {
 	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
                 return -1; // Returns -1 on structural API error
 
-	// Ensures clean disconnect if the client is connected / awaiting cleanup
-	client_state_t current_state = atomic_load(&client_ctx->state);
-	if (current_state == STATE_CONNECTED || current_state == STATE_AWAITING_CLEANUP)
+	// Force a disconnect on socket / TCP connection if client is not disconnected
+	if (atomic_load(&client_ctx->state) != STATE_DISCONNECTED)
 		atomicio_cl_disconnect(client_ctx);
 
 	// Clean up client mutexes
@@ -350,10 +352,10 @@ int atomicio_cl_destroy(atomicio_cl_t** client_ctx_ptr) {
 	// Brick magic token to avoid stale pointers
 	client_ctx->token = 0;
 
-	// Free client context memory
-	free(client_ctx);		
+	// Nullify user's pointer / Free client context memory
 	*client_ctx_ptr = NULL;
-	
+	free(client_ctx);		
+
 	return 0;
 }
 
@@ -468,7 +470,10 @@ int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, broadcast_view_t* 
 void* recv_thread(void* arg) {
 	// Client context
 	atomicio_cl_t* client_ctx = (atomicio_cl_t*)arg;	
-        
+	
+	// Set thread active flag
+	atomic_store(&client_ctx->recv_thread_active, true);       
+ 
 	// Allocate temporary receive packet buffer onto the heap	
 	packet_t* rx_pkt_buf = (packet_t*)malloc(sizeof(packet_t) * MAX_CONNECTIONS);	
 	if (!rx_pkt_buf) {
@@ -519,9 +524,10 @@ void* recv_thread(void* arg) {
 		// Load broadcast clients data into local struct --> memcpy to client_ctx struct under mutex to save time
 		broadcast_view_t local_view;
                 for (int i = 0; i < active_users; i++) {
-                        local_view.snapshots[i].payload_len = ntohs(rx_pkt_buf[i].payload_len);
+                        uint16_t plen = ntohs(rx_pkt_buf[i].payload_len);
+			local_view.snapshots[i].payload_len = plen;
 			memcpy(local_view.snapshots[i].uuid, rx_pkt_buf[i].client_uuid, CLIENT_USERNAME_SIZE);
-                        memcpy(local_view.snapshots[i].payload, rx_pkt_buf[i].payload, rx_pkt_buf[i].payload_len);
+                        memcpy(local_view.snapshots[i].payload, rx_pkt_buf[i].payload, plen);
                 }
                 local_view.count = active_users;
 		local_view.timestamp = at_ntohll(rx_pkt_buf[0].timestamp);
