@@ -273,8 +273,8 @@ static void* client_io_thread(void* args) {
 		uint64_t now = now_ms();
 		uint64_t elapsed = now - last_send_time;
 		int timeout_ms = 0;
-		if (elapsed < NETWORK_TRANSFER_PERIOD) {
-			timeout_ms = (int)(NETWORK_TRANSFER_PERIOD - elapsed);
+		if (elapsed < NETWORK_BROADCAST_PERIOD) {
+			timeout_ms = (int)(NETWORK_BROADCAST_PERIOD - elapsed);
 		}
 			
 		// Waits for available data to read from client socket or if it is time to send data
@@ -347,9 +347,9 @@ static void* client_io_thread(void* args) {
 		
 		now = now_ms();
 		uint64_t delay;
-		if ((delay = (now - last_send_time)) >= NETWORK_TRANSFER_PERIOD) {
+		if ((delay = (now - last_send_time)) >= NETWORK_BROADCAST_PERIOD) {
 			// Update server metadata (late packets / latency)
-			float latency_ratio = (float)delay / NETWORK_TRANSFER_PERIOD;
+			float latency_ratio = (float)delay / NETWORK_BROADCAST_PERIOD;
 			float tl = atomic_load(&server_ctx->metadata.total_latency);
 			atomic_store(&server_ctx->metadata.total_latency, tl + latency_ratio);
 			atomic_fetch_add(&server_ctx->metadata.late_packets, 1);

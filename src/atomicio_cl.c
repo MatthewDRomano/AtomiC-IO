@@ -86,24 +86,18 @@ static uint64_t now_ms() {
 
 
 atomicio_cl_t* atomicio_cl_create(const char* uuid) {
-	// Allocate space for new client on heap
-	atomicio_cl_t* new_client_ctx = (atomicio_cl_t*)malloc(sizeof(atomicio_cl_t));
+	// 1. Allocate space for new client on heap, fields 0 by default
+	atomicio_cl_t* new_client_ctx = (atomicio_cl_t*)calloc(1, sizeof(atomicio_cl_t));
 	if (!new_client_ctx) {
 		fprintf(stderr, "Unable to allocate memory for AtomiC-IO client\n");
 		return NULL;
 	}
 
-	// Set validity token to magic_cookie
+	// 2. Set nonzero default fields
 	new_client_ctx->token = ATOMICIO_CL_MAGIC_COOKIE;
-
-	// Zero-set network fields
-        memset(&new_client_ctx->network.server, 0, sizeof(new_client_ctx->network.server));
         new_client_ctx->network.socket_fd = -1;
 
-	// Zero-set local/broadcast client packet(s) and init respective mutexes
-	memset(&new_client_ctx->my_client, 0, sizeof(packet_t));
-	memset(&new_client_ctx->broadcast_data, 0, sizeof(broadcast_view_t));
-	memset(new_client_ctx->all_clients_broadcast, 0, sizeof(packet_t) * MAX_CONNECTIONS);
+	// 3. Initialize mutexes
 	int rc = pthread_mutex_init(&new_client_ctx->my_client_mutex, NULL);
 	if (rc != 0) {
 		fprintf(stderr, "Error initializing local client mutex: %d\n", rc);
@@ -116,10 +110,12 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid) {
                 goto err_destroy_client_mutex;
         }
 
-	// Set specified uuid
-	// Bound constant defined in at_net.h
+	// 4. Set specified uuid --> Bound constant defined in at_net.h
 	snprintf(new_client_ctx->my_client.client_uuid, CLIENT_USERNAME_SIZE, "%s", uuid);
 
+<<<<<<< HEAD
+	// 5. Initialize necessary Atomics (Only nonzero ones or for explicit readibility)
+=======
 	// Set recv thread joined default value
 	atomic_init(&new_client_ctx->recv_thread_active, false);
 	
@@ -128,13 +124,15 @@ atomicio_cl_t* atomicio_cl_create(const char* uuid) {
 	atomic_init(&new_client_ctx->active_user_count, 0);
 	atomic_init(&new_client_ctx->metadata.bytes_sent, 0);
 	atomic_init(&new_client_ctx->metadata.bytes_received, 0);
+>>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 	atomic_init(&new_client_ctx->metadata.init_epoch, now_ms());
-	atomic_init(&new_client_ctx->metadata.connection_epoch, 0);
-
-	// Client is now fully initialized and address is returned
 	atomic_init(&new_client_ctx->state, STATE_DISCONNECTED);
-	return new_client_ctx;
+	atomic_init(&new_client_ctx->recv_thread_active, false);
 
+	// NOTE: All network, metadata, and packet fields are 
+	// already safely 0 due to calloc
+
+	return new_client_ctx;
 
 
 	// Error initializing broadcast clients mutex. Destroy local client mutex and cascade
@@ -274,10 +272,17 @@ int atomicio_cl_connect(atomicio_cl_t* client_ctx, const char* port_str, const c
  * Upon successful teardown, the user must call atomicio_cl_disconnect() to finalize the disconnection process
  */ 
 static void internal_connection_teardown(atomicio_cl_t* client_ctx) {
+<<<<<<< HEAD
+
+	// This will run once, even if both recv and main threads detect failure concurrently
+	client_state_t expected = STATE_CONNECTED;
+	if (!atomic_compare_exchange_strong(&client_ctx->state, &expected, STATE_AWAITING_CLEANUP))
+=======
 	// Ensures this block only runs if client state is connected
 	// This will run once, even if both recv and send threads detect failure concurrently
 	client_state_t expected = STATE_CONNECTED;
 	if (atomic_compare_exchange_strong(&client_ctx->state, &expected, STATE_AWAITING_CLEANUP))
+>>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 		return;
 		
 	// Interrupts blocking read / write
@@ -294,11 +299,14 @@ int atomicio_cl_disconnect(atomicio_cl_t* client_ctx) {
 	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
                 return -1; // Returns -1 on structural API error
 	
+<<<<<<< HEAD
+=======
 	// Ensures object is able to be disconnected (in state CONNECTED or AWAITING_CLEANUP)
 	//client_state_t old_state = atomic_exchange(&client_ctx->state, STATE_AWAITING_CLEANUP);
 	//if (atomic_load(&client_ctx->state) == STATE_DISCONNECTED)
 	//	return 0;
 
+>>>>>>> 788593b88a131a203c214d9cbd7bf35d2c8e38f6
 	// Severs TCP and sets state to awaiting cleanup
 	internal_connection_teardown(client_ctx);
 
@@ -454,6 +462,7 @@ int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, broadcast_view_t* 
                 return -1; // Returns -1 on structural API error	
 
 	// Protect read from simultaneous writes to broadcast_data
+	// Performs struct copy
 	pthread_mutex_lock(&client_ctx->all_clients_broadcast_mutex);
 	*view = client_ctx->broadcast_data;	
 	pthread_mutex_unlock(&client_ctx->all_clients_broadcast_mutex);
@@ -522,7 +531,7 @@ void* recv_thread(void* arg) {
                 atomic_store(&client_ctx->active_user_count, active_users);
 
 		// Load broadcast clients data into local struct --> memcpy to client_ctx struct under mutex to save time
-		broadcast_view_t local_view;
+		broadcast_view_t local_view = {0};
                 for (int i = 0; i < active_users; i++) {
                         uint16_t plen = ntohs(rx_pkt_buf[i].payload_len);
 			local_view.snapshots[i].payload_len = plen;
