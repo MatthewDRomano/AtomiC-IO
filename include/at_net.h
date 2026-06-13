@@ -20,7 +20,7 @@
 
 // Network time protocols
 #define NETWORK_BROADCAST_PERIOD 25				// Bounded Server->Client data transfer rate (every __ ms)
-#define PACKET_DROP_THRESHOLD (NETWORK_TRANSFER_PERIOD * 2)     // Threshold to drop packets if specified by user (server side)
+#define PACKET_DROP_THRESHOLD (NETWORK_BROADCAST_PERIOD * 2)     // Threshold to drop packets if specified by user (server side)
 
 
 /**

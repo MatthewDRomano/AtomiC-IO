@@ -195,8 +195,10 @@ static int atomicio_connect_to_host(atomicio_cl_t* client_ctx, const char* ipv4_
 	freeaddrinfo(result); 
 
 	// Upon no valid host	
-	if (!current)
+	if (!current) {
+		fprintf(stderr, "No valid host found\n");
 		return -1;
+	}
 
 	// Valid host / connection
 	return 0;
