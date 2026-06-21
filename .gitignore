@@ -19,5 +19,5 @@
 *.txt
 /build
 /lib
-/logs
+/logs/*
 /obj
