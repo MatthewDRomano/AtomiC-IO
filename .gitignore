@@ -19,5 +19,8 @@
 *.txt
 /build
 /lib
+
 /logs/*
+!/logs/.gitkeep
+
 /obj
