@@ -44,7 +44,6 @@ typedef struct {
 // Stores client collected metadata (per session, across connections)
 typedef struct {
 	_Atomic(uint64_t) bytes_sent;
-	_Atomic(uint64_t) bytes_received;
 	_Atomic(uint64_t) init_epoch;
 	_Atomic(uint64_t) connection_epoch;
 } telemetry_t;
@@ -446,7 +445,13 @@ int atomicio_cl_get_broadcast_data(atomicio_cl_t* client_ctx, broadcast_view_t* 
 	return 0;
 }
 
+int64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx) {
+	if (!client_ctx || client_ctx->token != ATOMICIO_CL_MAGIC_COOKIE)
+        	return -1; // Returns -1 on structural API error
 
+	// Returns the cumulative amount of bytes sent across all connected sessions
+	return atomic_load(&client_ctx->metadata.bytes_sent);
+}
 
 
 

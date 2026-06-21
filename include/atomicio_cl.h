@@ -131,10 +131,4 @@ int64_t atomicio_cl_lifetime(atomicio_cl_t* client_ctx);
 int64_t atomicio_cl_get_bytes_sent(atomicio_cl_t* client_ctx);
 
 
-/**
- * Returns the total number of bytes received from the server
- * Returns -1 if the client context is not valid 
-*/
-int64_t atomicio_cl_get_bytes_received(atomicio_cl_t* client_ctx);
-
 #endif

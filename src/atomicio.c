@@ -706,9 +706,9 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
 	
 	// Server is "running"
         atomic_store(&server_ctx->state, STATE_ONLINE);
-        fprintf(stdout, "Server Listening on port: %d\n", ntohs(server_ctx->settings.server.sin_port));
-        fprintf(stdout, "Max users: %d\n", server_ctx->settings.max_users);
-        fflush(stdout);
+        //fprintf(stdout, "Server Listening on port: %d\n", ntohs(server_ctx->settings.server.sin_port));
+        //fprintf(stdout, "Max users: %d\n", server_ctx->settings.max_users);
+        //fflush(stdout);
 
         // Spawns reaper thread to cleanup dead client threads
         if (pthread_create(&server_ctx->reaper_tid, NULL, reaper_thread, server_ctx) != 0) {
