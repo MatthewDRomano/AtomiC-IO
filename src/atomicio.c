@@ -319,6 +319,7 @@ static void* client_io_thread(void* args) {
 				bool should_disconnect = false;
 				switch ((message_type_t)ntohs(rx_pkt_buf.type)) {
 					case LOGIN:
+						; // Declaration CANNOT follow label prior to C23
 						char connect_msg[MAX_MSG_LEN];
                                         	snprintf(connect_msg, MAX_MSG_LEN, "CONNECTED: %s", rx_pkt_buf.client_uuid);
                                         	msglog(connect_msg, server_ctx->settings.log_path);
@@ -410,7 +411,7 @@ static void* client_accept_thread(void* arg) {
                 int client_fd = -1;
 
                 // Checks for accept() error / BLOCKING
-                while (!atomic_load(&server_ctx->shutdown_requested) && ((client_fd = accept(atomic_load(&server_ctx->settings.socket_fd),
+                while (!atomic_load(&server_ctx->shutdown_requested) && ((client_fd = accept(server_ctx->settings.socket_fd,
                         (struct sockaddr*)&new_client,
                         &adderlen)) == -1)) {
 
@@ -674,7 +675,7 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
 
 
         // Copy fd to global settings
-        atomic_store(&server_ctx->settings.socket_fd, listen_fd);
+        server_ctx->settings.socket_fd = listen_fd;
 
         // SO_REUSEADDR Allows rebind to same port after server termination w/o a delay
         // regardless if clients in TIME_WAIT or not
@@ -744,7 +745,9 @@ int atomicio_server_run(atomicio_server_ctx* server_ctx) {
 	
 	// Closes log and listening fd
 	err_close_server_rsrcs:
-	int fd_to_close = atomic_exchange(&server_ctx->settings.socket_fd, -1);
+	; // Declaration CANNOT follow label prior to C23
+	int fd_to_close = server_ctx->settings.socket_fd;
+	server_ctx->settings.socket_fd = -1;
 	if (fd_to_close >= 0)
 		close(fd_to_close);
 
@@ -777,7 +780,8 @@ int atomicio_server_shutdown(atomicio_server_ctx* server_ctx) {
 	atomic_store(&server_ctx->shutdown_requested, true);		
 
 	// Close listening client to break blocking accept() loop
-	int fd_to_close = atomic_exchange(&server_ctx->settings.socket_fd, -1);
+	int fd_to_close = server_ctx->settings.socket_fd;
+	server_ctx->settings.socket_fd = -1;
 	if (fd_to_close >= 0) {
 		shutdown(fd_to_close, SHUT_RDWR); // needed to wake accept() block
 		close(fd_to_close);

@@ -273,6 +273,7 @@ static void* perform_logging(void* arg) {
 			fclose(log_file);
 			
 			skip_log:
+			; // Declaration CANNOT follow label prior to C23
 			log_entry_t* prev = current;	
 			current = current->next_entry;
 			free(prev);	
