@@ -20,6 +20,7 @@
 /build
 /lib
 /obj
+/bin
 
 /logs/*
 !/logs/.gitkeep
