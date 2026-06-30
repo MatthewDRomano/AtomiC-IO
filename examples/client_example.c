@@ -10,20 +10,14 @@
  *   - Connection diagnostics / metadata getters
  *   - Graceful shutdown on SIGINT/SIGTERM
  *
- * Build (run from the project root, assuming this layout):
+ * Build (run from the project root with Makefile):
  *
- *   project_root/
- *         include/   (at_net.h, atomicio.h, atomicio_cl.h, log.h)
- *         src/           (at_net.c, atomicio.c, atomicio_cl.c, log.c)
- *         examples/  (this file)
+ * make
  *
- *   gcc -Wall -Wextra -pthread \
- *           examples/client_example.c \
- *           src/atomicio_cl.c src/at_net.c \
- *           -o client_example
+ * cd ./bin
  *
  * Run:
- *   ./client_example <server_ip> <port> <your_uuid>
+ *   ./client_example <server_ip / domain name> <port> <your_uuid>
  *   ./client_example 127.0.0.1 5555 alice
  */
 

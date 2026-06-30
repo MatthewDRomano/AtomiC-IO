@@ -10,17 +10,11 @@
  *   - Each client publishing its own data and observing everyone else's
  *   - A clean, ordered shutdown: clients first, then the server, then logging
  *
- * Build (run from the project root, assuming this layout):
+ * Build (run from the project root, with Makefile):
  *
- *   project_root/
- *         include/   (at_net.h, atomicio.h, atomicio_cl.h, log.h)
- *         src/           (at_net.c, atomicio.c, atomicio_cl.c, log.c)
- *         examples/  (this file)
+ * make
  *
- *   gcc -Wall -Wextra -pthread \
- *           examples/loopback_demo.c \
- *           src/atomicio.c src/atomicio_cl.c src/at_net.c src/log.c \
- *           -o loopback_demo
+ * cd ./bin
  *
  * Run:
  *   ./loopback_demo
