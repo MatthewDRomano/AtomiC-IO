@@ -60,6 +60,12 @@ atomicio_server_destroy(&server);
 
 ---
 
+### Getting Started
+
+**Prerequisites:** A POSIX-compliant operating system (Linux/macOS) and `gcc` / `clang` (with support for C11 standard atomics).
+
+#### Local Building (Library, Examples, & Tests)
+
 Running the standard `make` command compiles your core source files into a static library (`libatomicio.a`) and automatically compiles all your examples and tests, linking them directly against that local library.
 
 ```bash
