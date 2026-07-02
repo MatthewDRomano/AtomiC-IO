@@ -12,17 +12,9 @@
  *   - Each client sending the maximum amount of data possible, and observing everyone else's data with little delay
  *   - The background logger to see how efficiently it handles logging from various threads at the same time
  *
- * Build (run from the project's tests folder, assuming this layout):
+ * Build (run from the project's root with Makefile):
  *
- *   project_root/
- *         include/   (at_net.h, atomicio.h, atomicio_cl.h, log.h)
- *         src/           (at_net.c, atomicio.c, atomicio_cl.c, log.c)
- *         tests/  (currently in this directory)
- *
- *   gcc -Wall -Wextra -pthread \
- *           stress_test.c \
- *           ../src/atomicio.c ../src/atomicio_cl.c ../src/at_net.c ../src/log.c \
- *           -o stress_tester
+ * make && cd ./bin
  *
  * Run:
  *   ./stress_tester

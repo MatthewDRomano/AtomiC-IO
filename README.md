@@ -66,7 +66,7 @@ atomicio_server_destroy(&server);
 
 #### Local Building (Library, Examples, & Tests)
 
-Running the standard `make` command compiles your core source files into a static library (`libatomicio.a`) and automatically compiles all your examples and tests, linking them directly against that local library.
+Running the standard `make` command compiles all core source files into a static library (`libatomicio.a`) and automatically compiles all examples and tests, linking them directly against that local library.
 
 ```bash
 # Clone the repository
@@ -83,16 +83,16 @@ This populates the `bin/` folder with executable binaries. You can run them inst
 
 #### Global Installation (System-Wide Includes & Libraries)
 
-To make the framework accessible across your entire machine, run `make install`. This copies your public header files and the compiled library file into standard global system paths (`/usr/local/include/atomicio/` and `/usr/local/lib/`), making them available to any other project you write.
+To make the framework accessible across your entire machine, run `make install`. This copies the public header files and the compiled library file into standard global system paths (`/usr/local/include/atomicio/` and `/usr/local/lib/`), making them available to any other project you write.
 
 ```bash
 # Install headers and library system-wide
 sudo make install
 ```
 
-#### Consuming the Global Library
+#### Using the Global Library
 
-Once installed system-wide, you no longer need relative paths or local source folders. You can include the server or client headers using system angle brackets, and link against the library anywhere on your computer using the `-latomicio` flag.
+Once installed system-wide, you can include the server or client headers using system angle brackets, and link against the library anywhere on your computer using the `-latomicio` flag.
 
 ```c
 #include <atomicio/atomicio.h>    // Global Server features
@@ -101,7 +101,7 @@ Once installed system-wide, you no longer need relative paths or local source fo
 int main() {
     atomicio_config_t config = { .port = 8080, .max_users = 128 };
     atomicio_server_ctx* server = atomicio_create_server(&config);
-    // Your application logic here...
+    // Application logic here...
     return 0;
 }
 ```
@@ -122,7 +122,7 @@ To remove local build artifacts (`obj/` and `bin/`):
 make clean
 ```
 
-To completely strip the global includes and libraries from your system paths:
+To completely strip the global includes and libraries from system paths:
 
 ```bash
 sudo make uninstall
