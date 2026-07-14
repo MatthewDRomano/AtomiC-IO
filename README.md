@@ -92,7 +92,9 @@ sudo make install
 
 #### Using the Global Library
 
-Once installed system-wide, you can include the server or client headers using system angle brackets, and link against the library anywhere on your computer using the `-latomicio` flag.
+Once installed system-wide, you can include the server or client headers using system angle brackets, and link against the library anywhere on your computer using the `-latomicio` flag. 
+
+Furthermore, you must specify the preprocessor flag: `USE_GLOBAL_HEADER` during compilation. (e.g. `gcc -DUSE_GLOBAL_HEADER ...`)
 
 ```c
 #include <atomicio/atomicio.h>    // Global Server features
