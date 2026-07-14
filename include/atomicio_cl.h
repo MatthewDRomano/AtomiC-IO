@@ -3,7 +3,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../include/at_net.h"
+
+#ifdef USE_GLOBAL_HEADER
+	#include <atomicio/at_net.h>
+#else
+	#include "../include/at_net.h"
+#endif
+
 
 // 0. OPAQUE CLIENT CONTEXT STRUCT --> allows multiple client instances per process
 // 	|-> Stores client data internally and encapsulates internal structure

@@ -109,7 +109,7 @@ int main() {
 **Global Compilation Command:**
 
 ```bash
-gcc my_app.c -latomicio -pthread -o my_app
+gcc my_app.c -latomicio -pthread -DUSE_GLOBAL_HEADER -o my_app
 ```
 
 ---
