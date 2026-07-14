@@ -96,7 +96,7 @@ int main(void) {
          * ------------------------------------------------------------------ */
         if (atomicio_log_init() != 0) {
                 fprintf(stderr, "Failed to initialize logging\n");
-                return EXIT_FAILURE;
+                return -1;
         }
 
         atomicio_config_t config = {
@@ -111,14 +111,14 @@ int main(void) {
         if (!server) {
                 fprintf(stderr, "Failed to create server\n");
                 atomicio_log_shutdown();
-                return EXIT_FAILURE;
+                return -1;
         }
 
         if (atomicio_server_run(server) != 0) {
                 fprintf(stderr, "Failed to start server\n");
                 atomicio_server_destroy(&server);
                 atomicio_log_shutdown();
-                return EXIT_FAILURE;
+                return -1;
         }
 
         printf("Demo server running on port %s\n\n", DEMO_PORT_STR);
@@ -157,5 +157,5 @@ int main(void) {
         atomicio_log_shutdown();
 
         printf("Demo complete.\n");
-        return EXIT_SUCCESS;
+        return 0;
 }
