@@ -8,6 +8,7 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -248,10 +249,8 @@ static void* client_io_thread(void* args) {
 	packet_t* broadcast_buffer = (packet_t*)malloc(sizeof(packet_t) * MAX_CONNECTIONS);
 	if (!broadcast_buffer) {
 		errlog(ct->client_fd, errno, "IO thread: malloc()", "N/A", server_ctx->settings.log_path); // Not worried about race. ct->client_fd is effectively read only
-		goto err_kill_client;
+		goto err_buf_alloc;
 	}
-
-	struct pollfd pfd;
 
 	/* 
 	 * Duplicates client socket file descriptor.   
@@ -260,16 +259,27 @@ static void* client_io_thread(void* args) {
 	*/
 	
 	int io_fd = dup(ct->client_fd);
+		
+	// Sets socket options for receive / read timeout
+	// DISCONNECTS if client hangs for 10 seconds
+	struct timeval tv;
+	tv.tv_sec = 10;       // 10 seconds
+	tv.tv_usec = 0;       // 0 microseconds
+	if (setsockopt(io_fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv)) < 0) {
+		errlog(io_fd, errno, "IO thread: setsockopt()", "N/A", server_ctx->settings.log_path);
+		goto err_sockopt;
+	}
 
+	struct pollfd pfd;
+	pfd.fd = io_fd;
+	pfd.events = POLLIN;
+	
 	// ms timestamp of last write to client
 	uint64_t last_send_time = now_ms();
 	
 	// Temp rx_pkt_buf to read client data into. Later mutex memcpy into ct->data_packet
 	packet_t rx_pkt_buf = {0};
 	while (!atomic_load(&ct->finished)) {
-		pfd.fd = io_fd;
-        	pfd.events = POLLIN;
-	
 		uint64_t now = now_ms();
 		uint64_t elapsed = now - last_send_time;
 		int timeout_ms = 0;
@@ -300,8 +310,11 @@ static void* client_io_thread(void* args) {
 				// Full read ensures number of packets read is between 1 and MAX_CONNECTIONS. (Guaranteed to be 1 here from client)
 				int result = 0;
 				if ((result = full_read(io_fd, &rx_pkt_buf)) != 0) {
+					// Socket IO timeout
+					const char* tmout_status = (result == EAGAIN || result == EWOULDBLOCK) ? " (timeout)" : "";
+
 					char dc_msg[MAX_MSG_LEN];
-					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED: %s", rx_pkt_buf.client_uuid);
+					snprintf(dc_msg, MAX_MSG_LEN, "DISCONNECTED%s: %s", tmout_status, rx_pkt_buf.client_uuid);
 					msglog(dc_msg, server_ctx->settings.log_path);	
 					
 					break;
@@ -385,11 +398,12 @@ static void* client_io_thread(void* args) {
 
 
 	// Clean up client IO resources
+	err_sockopt:
 	free(broadcast_buffer);
 	close(io_fd);
 
 	// Goto symbol for if broadcast buffer allocation fails --> Kills client before any IO occurs
-	err_kill_client:
+	err_buf_alloc:
 	atomic_store(&ct->finished, true);
 
 	free(args);	
