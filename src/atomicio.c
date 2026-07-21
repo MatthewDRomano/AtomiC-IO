@@ -259,9 +259,13 @@ static void* client_io_thread(void* args) {
 	*/
 	
 	int io_fd = dup(ct->client_fd);
+	if (io_fd == -1) {
+		errlog(ct->client_fd, errno, "IO thread: dup()", "N/A", server_ctx->settings.log_path);
+		goto err_fd_dup;
+	}	
 		
 	// Sets socket options for receive / read timeout
-	// DISCONNECTS if client hangs for 10 seconds
+	// DISCONNECTS if client hangs for 10 seconds mid packet transfer
 	struct timeval tv;
 	tv.tv_sec = 10;       // 10 seconds
 	tv.tv_usec = 0;       // 0 microseconds
@@ -397,10 +401,13 @@ static void* client_io_thread(void* args) {
 	}
 
 
-	// Clean up client IO resources
+	// Goto symbol for if setsockopt() fails --> Close thread local fd
 	err_sockopt:
-	free(broadcast_buffer);
 	close(io_fd);
+	
+	// Goto symbol for if dup() fails --> Frees outbound IO buffer
+	err_fd_dup:
+	free(broadcast_buffer);
 
 	// Goto symbol for if broadcast buffer allocation fails --> Kills client before any IO occurs
 	err_buf_alloc:
